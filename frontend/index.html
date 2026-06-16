@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Visual Database Designer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="https://esm.sh/reactflow@11.11.4/dist/style.css" />
+    <!--
+      No build step: React, ReactDOM and React Flow are loaded as ES modules from a CDN via an
+      import map. canvas.js is the entry point. The page talks to the module's own
+      /design, /validate, /export and /generate endpoints (same origin).
+      Mermaid is loaded as a classic global for the ERD tab.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.3.1",
+        "react-dom": "https://esm.sh/react-dom@18.3.1",
+        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+        "reactflow": "https://esm.sh/reactflow@11.11.4?deps=react@18.3.1,react-dom@18.3.1"
+      }
+    }
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module" src="/static/canvas.js"></script>
+</body>
+</html>

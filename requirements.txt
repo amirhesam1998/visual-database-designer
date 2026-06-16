@@ -1,0 +1,2 @@
+# The SDK (installed separately in the Dockerfile) provides fastapi/pydantic/httpx/structlog.
+uvicorn[standard]==0.34.0

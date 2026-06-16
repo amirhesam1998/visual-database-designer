@@ -1,0 +1,14 @@
+{
+  "request_id": "conformance-1",
+  "project_id": "conformance-project",
+  "mode": "greenfield",
+  "inputs": {
+    "feature_request": "Build a clothing store with products, orders and payments"
+  },
+  "context": {
+    "llm": null,
+    "source": null,
+    "knowledge": null
+  },
+  "settings": { "database_type": "sql", "driver": "postgresql" }
+}
