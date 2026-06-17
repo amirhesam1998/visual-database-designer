@@ -29,6 +29,9 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.core import api_client as core_api_client
+from app.core import api_contract as core_api_contract
+from app.core import api_server as core_api_server
 from app.core import diff as core_diff
 from app.core import drift as core_drift
 from app.core import importer as core_importer
@@ -499,12 +502,50 @@ def register_interactive_routes(app: FastAPI) -> None:
             result = await core_seeder.enrich_text(result, _env_llm())
         return JSONResponse(result)
 
+    @app.post("/design/api/contract")
+    async def design_api_contract(request: dict) -> JSONResponse:
+        """Generate the OpenAPI 3.1 contract from a schema (Milestone 4) — the source of truth."""
+        schema = request.get("schema_json") or (request.get("handoff") or {}).get("schema_json")
+        if schema is None:
+            return JSONResponse({"error": "missing schema_json"}, status_code=400)
+        version = request.get("version", "v1")
+        openapi = core_api_contract.build_openapi(schema, version=version)
+        return JSONResponse({"openapi": openapi, "stats": core_api_contract.contract_stats(openapi)})
+
+    @app.post("/design/api/server")
+    async def design_api_server(request: dict) -> JSONResponse:
+        """Generate the reference FastAPI server files (Milestone 4 §3)."""
+        schema = request.get("schema_json") or (request.get("handoff") or {}).get("schema_json")
+        if schema is None:
+            return JSONResponse({"error": "missing schema_json"}, status_code=400)
+        target = request.get("target", "fastapi")
+        if target != "fastapi":
+            return JSONResponse({"error": f"unsupported target {target!r}; Milestone 4 supports 'fastapi'"},
+                                status_code=400)
+        files = core_api_server.generate_server_files(schema, version=request.get("version", "v1"))
+        return JSONResponse({"files": files, "target": target})
+
+    @app.post("/design/api/client")
+    async def design_api_client(request: dict) -> JSONResponse:
+        """Generate a TypeScript client + Postman collection from the OpenAPI document (secondary)."""
+        openapi = request.get("openapi")
+        if openapi is None:
+            schema = request.get("schema_json") or (request.get("handoff") or {}).get("schema_json")
+            if schema is None:
+                return JSONResponse({"error": "missing openapi or schema_json"}, status_code=400)
+            openapi = core_api_contract.build_openapi(schema, version=request.get("version", "v1"))
+        try:
+            result = core_api_client.generate_client(openapi, target=request.get("target", "typescript"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result)
+
     @app.get("/capabilities")
     async def capabilities() -> JSONResponse:
         """Capability manifest for the Designer expert module (spec §3)."""
         return JSONResponse({
             "module": "visual_database_designer",
-            "milestone": "m3-scenario-seeder",
+            "milestone": "m4-api-contract",
             "modes": ["greenfield", "brownfield"],
             "drivers": list(SUPPORTED_DRIVERS),
             "sessionStates": [s.value for s in SessionState],
@@ -519,6 +560,7 @@ def register_interactive_routes(app: FastAPI) -> None:
                            "/design/sessions/{id}/migration", "/design/sessions/{id}/handoff"],
                 "brownfield": ["/design/import", "/design/sessions (mode=brownfield)", "/design/drift"],
                 "seeder": ["/design/seed"],
+                "api": ["/design/api/contract", "/design/api/server", "/design/api/client"],
             },
             "driftCategories": ["synced", "migration_not_applied", "manual_prod_change",
                                 "design_ahead_of_code", "code_ahead_of_design", "migration_incomplete"],
@@ -529,6 +571,7 @@ def register_interactive_routes(app: FastAPI) -> None:
                 "aiBoundary": "the LLM only suggests/enriches; the rest of the pipeline is LLM-free",
                 "driftSafety": "drift is report-only; every reconciliation is a human-approved suggestion",
                 "seedSafety": "the seeder produces data/SQL; applying it is an explicit step (no auto-apply)",
+                "apiContract": "OpenAPI 3.1 is the source of truth; server & client derive from it (no auto-deploy)",
             },
         })
 

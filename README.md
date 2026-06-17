@@ -121,6 +121,22 @@ analysis — never auto-applying anything.
   gets a successful payment). Output is SQL `INSERT`s (topological order) or JSON; applying it is an
   explicit step (no auto-apply). The LLM, if any, only enriches free text.
 
+**API Contract — OpenAPI as source of truth (Milestone 4, `/design/api/*`)**
+- **OpenAPI 3.1** is generated **deterministically** from `schema_json` and is the single source of
+  truth: the reference server and the client both derive from it (and the compact contract it shares),
+  never re-derived from the schema, so all generators agree. Each table → CRUD paths under `/{version}`,
+  an output model (`Order`) and an input model (`OrderCreate`, read-only PK/timestamps excluded), with
+  field types from the **resolved Type System** — a foreign-key field inherits the referenced PK's type
+  (so `orders.user_id` is a `string/uuid`, never an integer). Status columns expose their reachable
+  state-machine states as an `enum`; errors are documented with an RFC 7807 `Problem` schema.
+- **Reference FastAPI server** (`/design/api/server`, proof vehicle, not a product): a self-contained,
+  standalone `main.py` driven by the embedded contract; validates every body against the contract
+  **before** the database (RFC 7807 `problem+json`, per-field `errors` → 422), maps unique/FK violations
+  → 409, missing → 404, and enforces state-machine transitions on `PATCH` (illegal → 422). One target
+  (FastAPI/Python), one driver (Postgres); CRUD + light nested reads. No auto-deploy.
+- **Client** (`/design/api/client`, secondary): a `fetch`-based TypeScript client + Postman collection,
+  derived from the OpenAPI document. The LLM, if any, only enriches descriptions/examples.
+
 ---
 
 ## 4. Architecture & how it works internally
@@ -405,6 +421,14 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/design/seed` | `{schema_json \| handoff, seed?, scenario?, output: sql\|json, enrich?}` → `{rows, sql\|data, warnings}` — deterministic, FK/enum/state-consistent data (preset scenarios: `ecommerce_medium`, `multi_tenant`, `ticketing`) |
+
+### API contract (Milestone 4)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/api/contract` | `{schema_json \| handoff, version?}` → `{openapi, stats:{resources,paths,operations}}` — deterministic OpenAPI 3.1, the source of truth |
+| POST | `/design/api/server` | `{schema_json \| handoff, target:"fastapi", version?}` → `{files:{main.py, requirements.txt, README.md}, target}` — self-contained reference server (no auto-deploy) |
+| POST | `/design/api/client` | `{openapi \| schema_json, target:"typescript"}` → `{files:{client.ts}, postman}` — secondary, derived from the OpenAPI document |
 
 ---
 
