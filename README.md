@@ -39,6 +39,117 @@ HTTP API (SDK build_module_app + extra routes)  /manifest /health /run · /desig
 Schema engine  (schema_model · validators · exporters · parsers · comparators · suggestions)
 ```
 
+## `app/core/` — the production-grade deterministic Core
+
+A second, pure (UI-independent — AD-4) engine built to the specs under `docs/` (`README.md`,
+`spec-*.md`, `00-architecture-decisions.md`). It speaks the layered, versioned **`schema_json`**
+format with **Stable IDs** and is the source of truth for the diff/risk/migration pipeline. It has
+no FastAPI/UI dependency, so the same logic powers the API, a future CLI/headless mode, the embedded
+component and the AI-SaaS pipeline. Everything is deterministic; an LLM only ever *suggests* (AD-5).
+
+| Subsystem | Module | Spec | Conformance |
+|-----------|--------|------|-------------|
+| Stable IDs (AD-1) | `core/ids.py` | spec-schema-json-format §8 | `test_schema_json.py` |
+| Layered `schema_json` (AD-3) | `core/schema_json.py` + `schema_json.schema.json` | spec-schema-json-format | `test_schema_json.py` (30) |
+| Type System (AD-2) | `core/type_system.py` | spec-type-system | `test_type_system.py` (27) |
+| Validation Engine | `core/validation.py` | README §5 + spec §10 | `test_validation.py` (17) |
+| Diff Engine | `core/diff.py` | spec-diff-engine | `test_diff.py` (15) |
+| Migration Risk Analyzer | `core/risk.py` | spec-migration-risk-analyzer | `test_risk.py` (24) |
+| State Machine Designer | `core/state_machine.py` | spec-state-machine-designer | `test_state_machine.py` (15) |
+
+Each subsystem ships with a conformance kit; the build order and the "don't advance until 10/10"
+gate from `docs/README.md` §4/§6 were followed. Exposed over HTTP as thin wrappers:
+
+```
+POST /core/validate        schema_json → structural errors + validation report (+ SARIF)
+POST /core/migrate         any-version schema_json → upgraded to the current formatVersion
+POST /core/diff            {from, to[, base]} → typed operation list (+ three-way conflicts)
+POST /core/risk            {from, to | operations} → risk report + safe plans + SARIF + exit code
+POST /core/state-machine   {stateMachine[, schema]} → enum/rules/tests/admin/api/seed/mermaid
+GET  /core/types           the Type Registry (for UI dropdowns)
+```
+
+## `/design/*` — Milestone 1: the greenfield pipeline + approval gate
+
+A thin orchestration layer (`app/core/design_session.py`, `suggest.py`, `sql_emitter.py`) on top of
+the Core that proves the end-to-end contract: **PRD → AI suggestion → human apply → validate →
+submit → approve → migration (executable SQL) → handoff**. The session is itself a small state
+machine and *is* the approval gate (AD-5: AI suggests, a human approves):
+
+```
+draft ──validate──▶ validated ──submit──▶ pending_approval ──approve──▶ approved
+  ▲                     │                        │
+  └──── edit ───────────┘                        └── reject ──▶ draft
+```
+
+- **Gate rules** (enforced + negatively tested): `/migration` and `/handoff` 409 unless `approved`;
+  `approved` is unreachable past a validation error (re-checked at approve); a **critical** op
+  (e.g. `drop_table`) blocks approval unless `acknowledgeCritical: true`; `approved` is immutable
+  (edit → `revise` starts a new version whose baseline is the approved schema).
+- **SQL Emitter** (`core/sql_emitter.py`, Postgres-only for M1): turns the diff operation list +
+  target schema into ordered `up`/`down` DDL; physical types come from the Type System, driver
+  clauses (`CREATE INDEX CONCURRENTLY`, …) reuse `risk.py`'s data; destructive ops are flagged
+  irreversible + `requiresBackup`.
+- **AI boundary** (`core/suggest.py`): the LLM only runs in `suggest`; its output passes through a
+  deterministic pipeline (assign Stable IDs, resolve semantic types, ensure a PK, drop hallucinated
+  relations, structural-validate). The whole path **works with no LLM** via a domain-aware heuristic.
+- **Determinism**: `validate`/`diff`/`risk`/`sql` are byte-identical for the same draft.
+
+```
+POST /design/sessions                         {mode, prd?, schema_json?} → new session (draft)
+POST /design/sessions/{id}/suggest            → {suggestion, diffFromCurrent, rationale} (NOT applied)
+POST /design/sessions/{id}/apply-suggestion   {schema_json} → draft updated
+POST /design/sessions/{id}/validate           → {state, report:{sarif, summary}}
+POST /design/sessions/{id}/submit             → pending_approval (409 if not validated)
+POST /design/sessions/{id}/approve            {approvedBy, acknowledgeCritical?} → approved | 409 gate_blocked
+POST /design/sessions/{id}/reject / revise    → draft | new revision session
+GET  /design/sessions/{id}[/migration|/handoff]   migration & handoff require state=approved
+GET  /capabilities                            capability manifest (modes, drivers, endpoints)
+```
+
+The M1 acceptance gate lives in `tests/milestones/test_m1_greenfield.py` (marked `conformance`):
+positive path + 4 negative gate tests + determinism + an SQL snapshot, plus an opt-in live-Postgres
+execution test (`VDB_TEST_POSTGRES_DSN`). `tests/conftest.py` fails loudly on the wrong interpreter.
+
+## `/design/import`, `/design/drift` — Milestone 2: brownfield import + three-way drift
+
+The mirror image of M1: read a real database back into the design world, then keep three sources of
+truth honest.
+
+- **Importer** (`app/core/importer.py`) — split into impure `introspect_postgres(dsn)`
+  (`information_schema`/`pg_catalog` → plain `IntrospectedSchema`) and **pure, deterministic**
+  `build_schema_json(...)`. The build assigns Stable IDs from names (so two imports are
+  byte-identical), reverse-infers semantic types (deterministic first, LLM only enriches the
+  ambiguous ones via `enrich_ambiguous`, AD-5), rebuilds relations from real FKs (the FK column's
+  type is read straight from the DB, so it's structurally correct — the inverse of the bug M1
+  caught), detects pivot tables (→ suggest `many_to_many`), preserves real physical types via
+  overrides, and reports schema-quality issues as **warnings, not crashes**.
+- **Three-way drift** (`app/core/drift.py`, pure) — compares **Designed** (A, Stable IDs) ↔
+  **Migrations** (B, a shadow DB the migrations were applied to, then imported) ↔ **Live** (C,
+  introspected). `reconcile` matches legs by name (+ structural similarity with a confidence;
+  ambiguous matches are *flagged*, never guessed) and adopts A's Stable IDs as canonical. Every
+  divergence is classified — `migration_not_applied`, `manual_prod_change`, `design_ahead_of_code`,
+  `code_ahead_of_design`, `migration_incomplete`, `synced` — and carries a **suggested** (never
+  auto-applied) reconciliation. Output projects to SARIF + an exit code (critical drift fails CI).
+- **Shared FK resolution** (`type_system.resolve_fk_physical`, spec §7): M1's emitter fix was
+  promoted to the Type System pipeline, so emitter (forward), importer (reverse) and drift all agree
+  a designed `foreign_key` column resolves to its referenced PK's type (no spurious drift).
+- **Baseline is parametrised** (spec §0): a brownfield session uses the imported schema as *both* the
+  initial draft and the migration baseline (`baselineSource: import`), so editing + migration is a
+  real delta from the live database — the exact mirror of greenfield's empty baseline.
+
+```
+POST /design/import         {dsn, name?, enrich?} → {schema_json, inference:{confident, ambiguous, suggestions}, validation}
+POST /design/sessions       {mode: "brownfield", importDsn | schema_json} → session (baselineSource=import)
+POST /design/drift          {designed, live|liveDsn, migrations|migrationsDsn|(migrationsDir+shadowDsn), sarif?}
+                            → {reconcile:{matched, ambiguous}, drift:[…], summary, exitCode, sarif?}
+```
+
+The M2 gate is `tests/milestones/test_m2_brownfield.py` (`conformance`): import snapshot + determinism,
+the **round-trip** `emit → apply → import → compare` (locks M1↔M2), all drift categories in one report,
+reconcile (no shared id + ambiguous), and opt-in live-Postgres tests (real import, live round-trip, and
+three-way drift over real schemas) that **must pass once** on a server to count as proven.
+
 - **`SchemaDesigner`** (`app/designer.py`) ties the stages together: design → validate → export →
   suggest improvements.
 - **AI is optional.** With an LLM it asks the model to design the schema and suggest improvements

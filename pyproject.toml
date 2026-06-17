@@ -2,6 +2,10 @@
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
+markers = [
+    "conformance: milestone acceptance gate (the proof-of-contract kit, distinct from unit tests)",
+    "live_postgres: requires a real PostgreSQL (set VDB_TEST_POSTGRES_DSN); skipped otherwise",
+]
 
 [tool.ruff]
 target-version = "py312"

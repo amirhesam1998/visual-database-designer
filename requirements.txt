@@ -1,2 +1,7 @@
 # The SDK (installed separately in the Dockerfile) provides fastapi/pydantic/httpx/structlog.
 uvicorn[standard]==0.34.0
+# Used by app/core/schema_json.py to validate the layered schema_json against the bundled JSON Schema.
+jsonschema==4.26.0
+# Postgres driver for the brownfield importer / three-way drift (Milestone 2): introspection,
+# shadow-DB migration apply, and live execution. Binary wheel avoids needing libpq at build time.
+psycopg[binary]==3.3.4

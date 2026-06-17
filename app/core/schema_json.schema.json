@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://visual-db-designer.dev/schema/schema_json/v1.json",
+  "title": "Visual Database Designer — schema_json",
+  "description": "Layered, versioned source-of-truth format for the Visual Database Designer. Structural validation only; referential integrity (e.g. relation targets, FK existence) is enforced by the Validation Engine, not by this schema.",
+  "type": "object",
+  "required": ["formatVersion", "logical"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": {
+      "type": "string",
+      "description": "Semver of the schema_json FORMAT itself (not the user's schema version).",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "meta": { "$ref": "#/$defs/meta" },
+    "logical": { "$ref": "#/$defs/logical" },
+    "physical": { "$ref": "#/$defs/physical" },
+    "semantic": { "$ref": "#/$defs/semantic" },
+    "presentation": { "$ref": "#/$defs/presentation" },
+    "generation": { "$ref": "#/$defs/generation" },
+    "extensions": {
+      "type": "object",
+      "description": "Namespaced plugin data. Keys must be namespaced (e.g. 'myteam:foo') to avoid collisions.",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "description": "Stable, immutable identifier (AD-1). Convention: type-prefix + ULID/UUID. Never changes on rename.",
+      "pattern": "^(tbl|fld|rel|idx|enm|sm|stt|trn)_[0-9A-Za-z._-]{4,}$"
+    },
+    "identifierName": {
+      "type": "string",
+      "description": "A technical name (table/column). Display-only; not used as a key.",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "i18nLabel": {
+      "type": "object",
+      "description": "Optional localized labels.",
+      "additionalProperties": { "type": "string" }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "databaseType": { "type": "string", "examples": ["postgres", "mysql", "sqlite"] },
+        "defaultDriver": { "type": "string" },
+        "schemaVersion": { "type": "string", "description": "User's own version label, distinct from formatVersion." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "logical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tables"],
+      "properties": {
+        "tables": { "type": "array", "items": { "$ref": "#/$defs/table" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "enums": { "type": "array", "items": { "$ref": "#/$defs/enumDef" } }
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "fields"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/identifierName" },
+        "displayName": { "$ref": "#/$defs/i18nLabel" },
+        "comment": { "type": "string" },
+        "domain": { "type": "string", "description": "Grouping module, e.g. auth, payment." },
+        "kind": { "type": "string", "enum": ["normal", "pivot", "log", "config", "system"] },
+        "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/field" } }
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "semanticType"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/identifierName" },
+        "displayName": { "$ref": "#/$defs/i18nLabel" },
+        "comment": { "type": "string" },
+        "semanticType": {
+          "type": "string",
+          "description": "References a Semantic Type id from the Type Registry (AD-2). May be namespaced (e.g. 'core:money')."
+        },
+        "nullable": { "type": "boolean", "default": false },
+        "default": {
+          "description": "Literal default value, or an expression marker.",
+          "type": ["string", "number", "boolean", "null"]
+        },
+        "isPrimaryKey": { "type": "boolean", "default": false },
+        "autoIncrement": { "type": "boolean", "default": false },
+        "enumId": {
+          "description": "Required when semanticType resolves to an enum; references logical.enums[].id.",
+          "$ref": "#/$defs/id"
+        },
+        "overrides": {
+          "type": "object",
+          "description": "User overrides on top of the resolved semantic type (AD-2).",
+          "additionalProperties": false,
+          "properties": {
+            "physical": { "type": "object", "additionalProperties": true },
+            "validation": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "add": { "type": "array", "items": { "type": "string" } },
+                "remove": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "formInput": { "type": "object", "additionalProperties": true },
+            "privacy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "pii": { "type": "boolean" },
+                "sensitivity": { "type": "string", "enum": ["none", "low", "medium", "high"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "fromTableId"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "description": "e.g. hasMany, belongsTo (display/codegen hint)." },
+        "type": {
+          "type": "string",
+          "enum": ["one_to_one", "one_to_many", "many_to_many", "polymorphic", "self", "has_many_through", "embedded"]
+        },
+        "fromTableId": { "$ref": "#/$defs/id" },
+        "toTableId": { "$ref": "#/$defs/id" },
+        "throughTableId": { "$ref": "#/$defs/id", "description": "For has_many_through." },
+        "pivot": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "For many_to_many.",
+          "properties": {
+            "tableId": { "$ref": "#/$defs/id" },
+            "tableName": { "$ref": "#/$defs/identifierName" }
+          }
+        },
+        "foreignKeyFieldId": { "$ref": "#/$defs/id" },
+        "morphName": { "type": "string", "description": "For polymorphic relations." },
+        "onDelete": { "type": "string", "enum": ["cascade", "restrict", "set_null", "no_action"] },
+        "onUpdate": { "type": "string", "enum": ["cascade", "restrict", "set_null", "no_action"] }
+      }
+    },
+    "enumDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "values"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "$ref": "#/$defs/identifierName" },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value"],
+            "properties": {
+              "value": { "type": "string" },
+              "label": { "$ref": "#/$defs/i18nLabel" }
+            }
+          }
+        }
+      }
+    },
+    "physical": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Driver-specific and index/storage concerns. Diff treats this as schema-affecting.",
+      "properties": {
+        "indexes": { "type": "array", "items": { "$ref": "#/$defs/index" } },
+        "driverOverrides": {
+          "type": "object",
+          "description": "Per-field, per-driver physical type overrides, keyed by field id.",
+          "additionalProperties": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tableId", "columns"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "tableId": { "$ref": "#/$defs/id" },
+        "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" }, "description": "Field ids." },
+        "unique": { "type": "boolean", "default": false },
+        "type": { "type": "string", "examples": ["btree", "gin", "hnsw", "ivfflat"] }
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Business meaning that drives generation and policy.",
+      "properties": {
+        "ownership": {
+          "type": "object",
+          "description": "Per-table owner field, keyed by table id.",
+          "additionalProperties": { "$ref": "#/$defs/id" }
+        },
+        "tenancy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": { "type": "string", "enum": ["single", "row", "schema_per_tenant", "db_per_tenant"] },
+            "tenantKeyFieldByTable": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/id" }
+            }
+          }
+        },
+        "businessRules": { "type": "array", "items": { "$ref": "#/$defs/businessRule" } },
+        "stateMachines": { "type": "array", "items": { "$ref": "#/$defs/stateMachine" } }
+      }
+    },
+    "businessRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "intent"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "category": { "type": "string", "enum": ["invariant", "validation", "service", "workflow"] },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "intent": { "type": "string", "description": "Human-readable intent (free text)." },
+        "structured": {
+          "type": "object",
+          "description": "Structured/executable form (subject-condition-constraint). Optional but recommended.",
+          "additionalProperties": true
+        },
+        "targets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "description": "Table/field/relation ids this rule binds to."
+        },
+        "enabled": { "type": "boolean", "default": true }
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "fieldId", "states", "transitions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string" },
+        "fieldId": { "$ref": "#/$defs/id", "description": "The Status field this machine governs." },
+        "states": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "name": { "type": "string" },
+              "label": { "$ref": "#/$defs/i18nLabel" },
+              "initial": { "type": "boolean", "default": false },
+              "final": { "type": "boolean", "default": false },
+              "color": { "type": "string" }
+            }
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "from", "to"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "name": { "type": "string", "description": "e.g. pay, ship, cancel." },
+              "from": { "$ref": "#/$defs/id", "description": "State id." },
+              "to": { "$ref": "#/$defs/id", "description": "State id." },
+              "guard": { "type": "string", "description": "Reference to a businessRule id or expression." },
+              "permission": { "type": "string" },
+              "sideEffects": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Canvas/layout. NOT schema-affecting; diff ignores this layer.",
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tableId", "x", "y"],
+            "properties": {
+              "tableId": { "$ref": "#/$defs/id" },
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "collapsed": { "type": "boolean", "default": false },
+              "color": { "type": "string" },
+              "group": { "type": "string" }
+            }
+          }
+        },
+        "viewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "zoom": { "type": "number" },
+            "offsetX": { "type": "number" },
+            "offsetY": { "type": "number" }
+          }
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "description": "Adapter-specific generation hints. Namespaced by adapter.",
+      "additionalProperties": { "type": "object", "additionalProperties": true }
+    }
+  }
+}
