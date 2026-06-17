@@ -1,323 +1,703 @@
-# Visual Database Designer (Phase 6F)
+# Visual Database Designer
 
-The **fourth expert module** of the AI Software Architect Platform — the database-intelligence layer.
-It turns a plain-language description into a normalized database schema, validates it, and exports
-it to SQL, a Laravel migration, a Prisma schema, a Mermaid ERD and an OpenAPI stub. It also ships an
-interactive drag & drop canvas.
+> The fourth expert module of the AI Software Architect Platform (Phase 6F). It turns a plain-language
+> feature description — or an existing database — into a **normalized, validated database schema** with
+> ready-to-use exports (SQL, Laravel migration, Prisma, Mermaid ERD, OpenAPI), an interactive drag &
+> drop canvas, an approval-gated migration pipeline, and brownfield import + drift detection.
+
+---
+
+## Table of contents
+
+1. [What this module is](#1-what-this-module-is)
+2. [The problem it solves](#2-the-problem-it-solves)
+3. [Features](#3-features)
+4. [Architecture & how it works internally](#4-architecture--how-it-works-internally)
+5. [Folder / file structure](#5-folder--file-structure)
+6. [Main classes, services, models, routes, views](#6-main-classes-services-models-routes-views)
+7. [Data model: "tables" & relationships](#7-data-model-tables--relationships)
+8. [API endpoints](#8-api-endpoints)
+9. [Admin panel & frontend behavior](#9-admin-panel--frontend-behavior)
+10. [Business rules](#10-business-rules)
+11. [Validation rules](#11-validation-rules)
+12. [Data flow](#12-data-flow)
+13. [Usage examples](#13-usage-examples)
+14. [Configuration](#14-configuration)
+15. [Dependencies](#15-dependencies)
+16. [Known limitations](#16-known-limitations)
+17. [Future improvements](#17-future-improvements)
+18. [Testing](#18-testing)
+
+---
+
+## 1. What this module is
+
+The Visual Database Designer is a **standalone microservice** (a "plugin module" in the platform's
+Module Protocol v1). It runs as its own FastAPI app on **port 9107** and can be driven three ways:
+
+- **As a platform pipeline stage** — the AI Orchestrator calls `POST /run` with a `feature_request`
+  and gets back a `database_schema` artifact (the Module Protocol contract).
+- **As an interactive tool** — a built-in React Flow **canvas** (served at `/canvas`) calls the
+  module's own REST endpoints (`/design`, `/validate`, `/export`, …) to design schemas visually.
+- **As a production design engine** — the `/core/*` and `/design/*` endpoints expose a deterministic,
+  approval-gated pipeline that takes a schema from *draft → approved → executable migration → handoff*,
+  plus brownfield **import** from a live Postgres database and three-way **drift** detection.
+
+It is **AI-optional**: with an LLM configured it asks the model to design schemas and propose
+improvements; with no LLM it falls back to deterministic, domain-aware templates and heuristics, so it
+is fully functional offline and its tests are reproducible.
+
+> **Conceptually it's a "design" module, but the Module Protocol `type` is `generation`** (it produces
+> a `database_schema`). It declares `consumes=[]`, `produces="database_schema"`, `modes=[greenfield,
+> brownfield]`, `needs.llm=True` (optional at runtime).
+
+---
+
+## 2. The problem it solves
+
+Designing a correct relational schema is slow and error-prone, and the design usually rots the moment
+code ships:
+
+- **Greenfield:** going from an idea to a normalized schema + migrations by hand is tedious; teams
+  forget indexes on foreign keys, store money as floats, leave PKs off tables, expose passwords, etc.
+- **Brownfield:** an existing database has no machine-readable "design"; you can't safely evolve what
+  you can't see, and reverse-engineering it by hand is unreliable.
+- **Drift:** the *designed* schema, the *migration files*, and the *live production database* silently
+  diverge. Someone hot-fixes prod with a manual `ALTER`; a migration is written but never deployed; the
+  design races ahead of the code. Nobody has a single view of all three.
+- **Safety:** auto-applying schema changes is dangerous (a `DROP TABLE` destroys data). Changes need a
+  human approval gate and a risk assessment before any DDL runs.
+
+This module addresses all four: it **designs** schemas (with quality validation), **exports** them to
+many targets, **imports** real databases back into an editable design, **detects drift** across the
+three sources of truth, and gates every migration behind an **explicit human approval** with a risk
+analysis — never auto-applying anything.
+
+---
+
+## 3. Features
+
+**Design & generation**
+- Natural-language → schema (LLM) with a deterministic domain-aware template fallback
+  (ecommerce / blog / saas / generic).
+- Deterministic schema **validation** (`{valid, errors, warnings}`).
+- **Exports:** SQL DDL, Laravel 11 migration, Prisma schema, Mermaid ERD, OpenAPI 3.0 stub, Markdown
+  data dictionary.
+- **Framework schema exports:** Django, SQLAlchemy, TypeORM, Sequelize.
+- **Model generators** (one table → ORM class): Laravel Eloquent, TypeORM, SQLAlchemy, Django, Prisma.
+- **CRUD generators** (one table → controller): Laravel, Express (TypeScript), Django REST.
+- **Schema versioning:** diff two versions → ordered SQL migration.
+
+**Interactive canvas** (`/canvas`)
+- Drag & drop tables; edit/add/delete columns (type, length, constraints, default, enum values).
+- Edit relationships (type + `on_delete`/`on_update`) via edge editor.
+- Reusable named enums, composite keys, explicit/composite indexes, table & column comments.
+- Table groups (colour-coded), search/filter, undo/redo (50-deep), zoom controls, field presets.
+- Tabs: **Design** / **ERD** (Mermaid) / **Code** (export + generate) / **Versions** (compare).
+
+**Production Core (`app/core/`) — deterministic schema engine**
+- **Stable IDs** (AD-1), **two-layer Type System** (semantic ↔ physical, AD-2), **layered/versioned
+  `schema_json`** with a bundled JSON Schema (AD-3), a **Validation Engine** (referential + quality +
+  security + performance, SARIF output), a **Diff Engine** (id-based, ordered operation list,
+  three-way), a **Migration Risk Analyzer** (expand/contract, rolling-vs-downtime, exit codes), a
+  **State Machine Designer**, and a **SQL Emitter** (Postgres up/down DDL).
+
+**Greenfield pipeline + approval gate (Milestone 1, `/design/*`)**
+- A design-session state machine (`draft → validated → pending_approval → approved`) that **is** the
+  approval gate (AD-5: AI suggests, a human approves). Migration & handoff are reachable only once
+  approved; a critical risk blocks approval unless explicitly acknowledged.
+
+**Brownfield import + three-way drift (Milestone 2, `/design/import`, `/design/drift`)**
+- **Importer:** introspect a live Postgres database → deterministic, Stable-ID `schema_json` (reverse
+  type inference, relations rebuilt from real FKs, pivot detection, enums, checks).
+- **Three-way drift:** compare **Designed ↔ Migrations ↔ Live**, classify every divergence, suggest a
+  reconciliation (never auto-fix), and emit SARIF + a CI exit code.
+
+**Scenario-based seeder (Milestone 3, `/design/seed`)**
+- Fills a schema with **valid, insertable data**: deterministic for a numeric `seed`, FK values are
+  *real* primary keys of generated referenced rows (via `resolve_fk_physical`), unique/nullable/enum
+  respected, status columns get only **reachable** state-machine states, and declarative *scenarios*
+  (counts + status distributions + "derive" rules) produce consistent dependent rows (a delivered order
+  gets a successful payment). Output is SQL `INSERT`s (topological order) or JSON; applying it is an
+  explicit step (no auto-apply). The LLM, if any, only enriches free text.
+
+---
+
+## 4. Architecture & how it works internally
+
+This module contains **two parallel layers** that a newcomer must not confuse. They use **two different
+schema representations**:
+
+| | "Simple" designer layer (`app/*.py`) | Production Core (`app/core/*.py`) |
+|---|---|---|
+| **Model** | `DatabaseSchema` (Pydantic) | layered `schema_json` (dict + JSON Schema) |
+| **Keys** | snake_case, `FieldType` enum (`varchar`, `bigint`, …) | camelCase, **semantic** types (`email`, `money`, `uuid`, …) |
+| **Identity** | by **name** | **Stable IDs** (`tbl_…`, `fld_…`, `rel_…`) — renames are first-class |
+| **Layers** | flat (tables/fields/relations) | `logical` / `physical` / `semantic` / `presentation` |
+| **Used by** | `/run` pipeline, the canvas, `/design`, `/validate`, `/export`, `/import`, `/generate`, `/compare` | `/core/*`, `/design/*` sessions, `/design/import`, `/design/drift` |
+| **Purpose** | fast, friendly, multi-target generation | rigorous, deterministic, production migration/drift |
+
+Both layers ship in the same service. The simple layer powers the everyday "describe → design →
+export" flow and the visual canvas. The Core powers the milestone pipelines (greenfield approval gate,
+brownfield import/drift) where correctness, determinism and safety matter most.
+
+### Five architecture decisions (the Core's backbone)
+
+The Core is built on five decisions documented in `docs/00-architecture-decisions.md`:
+
+- **AD-1 — Stable IDs.** Every entity has an immutable `id`; all references use the id, so a rename is
+  a first-class operation (not drop+add) and diff/merge are semantic.
+- **AD-2 — Two-layer Type System.** A field stores only a `semanticType` (+ optional overrides); one
+  registry record deterministically resolves the physical type, validation rules, form widget, OpenAPI,
+  fake-data generator and privacy class for every consumer — no knowledge is re-derived elsewhere.
+- **AD-3 — Layered, versioned `schema_json`.** The document has `logical` / `physical` / `semantic` /
+  `presentation` layers; the `presentation` layer (canvas positions) is **never** schema-affecting.
+  Format migrations are deterministic and registered by major version.
+- **AD-4 — Core-first.** All real logic lives in pure Core functions; the routes and UI are thin
+  wrappers. Everything in `app/core/` is deterministic and (mostly) LLM-free.
+- **AD-5 — AI suggests, a human approves.** The LLM only ever produces *suggestions*; everything after
+  the suggestion is deterministic and reproducible, and no migration/handoff is produced without an
+  explicit human approval.
+
+### Determinism
+
+`validate` / `diff` / `risk` / `sql` and **import** are byte-identical for the same input. The Diff
+Engine uses a composite sort key (not set-iteration order) so the operation list — and the SQL derived
+from it — is reproducible across processes. The importer derives every Stable ID from a deterministic
+hash of names, so two imports of the same database produce identical `schema_json`.
+
+---
+
+## 5. Folder / file structure
 
 ```
-User: "I need a clothing store database"
-   ↓
-[Visual Database Designer]
-   ├─ AI/heuristic design → users, products, orders, …
-   ├─ Validation          → ✅ valid · ⚠️ 3 warnings
-   └─ Export              → SQL · Laravel · Prisma · Mermaid · OpenAPI
+visual-database-designer/
+├── app/
+│   ├── main.py                 # ASGI entry point (`uvicorn app.main:app`)
+│   ├── module.py               # VisualDatabaseDesignerModule (Module Protocol: /manifest /health /run)
+│   ├── routes.py               # register_interactive_routes(app) — ALL extra HTTP endpoints
+│   │
+│   │   # ── Simple designer layer ──────────────────────────────────────────
+│   ├── schema_model.py         # DatabaseSchema / Table / SchemaField / Relation / Index / EnumDef
+│   ├── output.py               # DatabaseSchemaResult (the `/run` output payload)
+│   ├── designer.py             # SchemaDesigner — orchestrates design→validate→export→suggest
+│   ├── suggestions.py          # SchemaSuggestions — LLM design + improvement advice
+│   ├── templates.py            # build_template_schema — offline domain templates
+│   ├── prompts.py              # LLM system/user prompt strings
+│   ├── validators.py           # SchemaValidator — {valid, errors, warnings}
+│   ├── exporters.py            # SQL / Laravel / Prisma / Mermaid / OpenAPI / Markdown exporters
+│   ├── generators.py           # framework schema + ORM model + CRUD controller generators
+│   ├── parsers.py              # SQLParser, LaravelMigrationParser (regex-based import)
+│   ├── comparators.py          # SchemaComparator — version diff
+│   ├── versioning.py           # compare_schemas + diff_to_migration
+│   ├── presets.py              # field_presets() — common-column catalog for the canvas
+│   │
+│   └── core/                   # ── Production Core (deterministic schema_json engine) ──
+│       ├── schema_json.py          # layered schema_json models + load/migrate/validate_structure
+│       ├── schema_json.schema.json # bundled JSON Schema (structural validation)
+│       ├── ids.py                  # Stable IDs (AD-1): prefixed ULIDs
+│       ├── type_system.py          # Type Registry, ResolvedField, reverse inference, resolve_fk_physical
+│       ├── validation.py           # Validation Engine (referential/quality/security/perf, SARIF)
+│       ├── diff.py                 # Diff Engine (operation list, three-way conflict detect)
+│       ├── risk.py                 # Migration Risk Analyzer (levels, safe plan, SARIF, exit codes)
+│       ├── state_machine.py        # State Machine Designer (one definition → 6 outputs)
+│       ├── sql_emitter.py          # SQL Emitter (Postgres up/down DDL from the operation list)
+│       ├── design_session.py       # DesignSession + SessionStore (M1 state machine + approval gate)
+│       ├── suggest.py              # AI suggest (the only LLM touchpoint of the greenfield path)
+│       ├── importer.py             # M2 brownfield: introspect_postgres + build_schema_json + apply_sql
+│       ├── drift.py                # M2 three-way drift: reconcile + three_way_drift + SARIF
+│       └── seeder.py               # M3 scenario seeder: deterministic, FK/enum/state-consistent data
+│
+├── frontend/                   # No-build React Flow canvas (served at /canvas)
+│   ├── index.html              # import-map loader (React/ReactDOM/ReactFlow/Mermaid from CDN)
+│   ├── canvas.js               # the canvas app (schema↔graph, editors, tabs)
+│   ├── components/TableNode.js # a table node (columns, PK/FK markers, edit handles)
+│   └── styles.css              # canvas theme
+│
+├── docs/                       # Architecture decisions + per-engine specs + milestone specs
+├── tests/
+│   ├── conftest.py             # FAILS LOUDLY on the wrong interpreter (must be the SDK venv, py3.12)
+│   ├── core/                   # unit tests per Core engine
+│   ├── milestones/             # conformance kits: test_m1_greenfield.py, test_m2_brownfield.py
+│   └── test_module.py          # Module Protocol smoke tests
+├── Dockerfile                  # python:3.12-slim; installs SDK + requirements; runs uvicorn :9107
+├── requirements.txt            # uvicorn + jsonschema + psycopg[binary]
+└── pyproject.toml              # pytest config + markers (conformance, live_postgres) + ruff
 ```
 
-## What it is
+---
 
-| Property   | Value |
-|------------|-------|
-| Name       | `visual_database_designer` |
-| Protocol   | Module Protocol v1 (standalone HTTP service) |
-| Type       | `generation` (a schema *generator*; "design" module conceptually) |
-| Consumes   | — (driven by `feature_request`, threaded via `ctx.settings`) |
-| Produces   | `database_schema` |
-| Modes      | greenfield + brownfield |
-| Needs      | `llm: true` (optional — degrades to deterministic templates) |
-| Port       | 9107 |
+## 6. Main classes, services, models, routes, views
 
-## How it works
+### Module entry (`app/module.py`)
+- **`VisualDatabaseDesignerModule(Module)`** — declares the manifest, `output_model =
+  DatabaseSchemaResult`, and implements `run()` (resolves `feature_request`/`existing_database` from
+  inputs or `ctx.settings`, runs `SchemaDesigner`, returns the schema) and `health()`.
+- `app = build_module_app(module)` then `register_interactive_routes(app)` mounts everything else.
 
-Three layers, mirroring the other expert modules:
+### Simple layer "services"
+- **`SchemaDesigner`** (`designer.py`) — the orchestration service: `design()` (request → schema →
+  validate → export → suggest), `validate()`, `_assemble()`.
+- **`SchemaSuggestions`** (`suggestions.py`) — `suggest_schema()` (LLM or template fallback) and
+  `suggest_improvements()` (advisory strings).
+- **`SchemaValidator`** (`validators.py`) — deterministic `{valid, errors, warnings}`.
+- **Exporters** (`exporters.py`) — `SQLExporter`, `LaravelMigrationExporter`, `PrismaExporter`,
+  `MermaidExporter`, `OpenAPIExporter`, `MarkdownDocExporter` (façade: `EXPORTERS`, `export_one`,
+  `export_all`).
+- **Generators** (`generators.py`) — `export_framework_schema`, `generate_model`, `generate_crud`,
+  `supported_frameworks`.
+- **Parsers** (`parsers.py`) — `SQLParser`, `LaravelMigrationParser`, `parse_import`.
+- **`SchemaComparator`** (`comparators.py`) + `versioning.compare_schemas` / `diff_to_migration`.
 
-```
-Interactive canvas (React Flow, /canvas)   ── optional, browser ──┐
-                                                                  ▼
-HTTP API (SDK build_module_app + extra routes)  /manifest /health /run · /design /validate /export /import
-                                                                  ▼
-Schema engine  (schema_model · validators · exporters · parsers · comparators · suggestions)
-```
+### Simple layer models (`schema_model.py`, `output.py`)
+- **`DatabaseSchema`** → `tables[]`, `enums[]`, `driver`, `type`, `version`, helpers (`table()`,
+  `enum()`, `all_relations()`, `materialize_enums()`).
+- **`Table`** → `fields[]`, `relations[]`, `indexes[]`, `timestamps`, `soft_delete`, `group`,
+  `description`.
+- **`SchemaField`** → `name`, `type` (`FieldType`), `nullable`, `unique`, `indexed`, `primary_key`,
+  `auto_increment`, `default`, `length/precision/scale`, `values`/`enum_ref`, `description`.
+- **`Relation`** → `from_table/from_field`, `to_table/to_field`, `type` (`RelationType`), `on_delete`,
+  `on_update`.
+- **`Index`** → `name`, `columns`, `unique`, `type` (`btree`|`fulltext`).
+- **`DatabaseSchemaResult`** (`output.py`) — the `/run` output: `tables`, `relations`, `validation`,
+  `exports{sql,migration,prisma,mermaid,openapi,markdown}`, `suggestions`.
 
-## `app/core/` — the production-grade deterministic Core
+### Core layer (`app/core/`)
+- **`schema_json`** — `SchemaJson` (+ `Table`, `Field_`, `Relation`, `Index`, `EnumDef`, `StateMachine`,
+  layers); `load()`, `migrate()`, `validate_structure()`, `dump()`.
+- **`type_system`** — `TypeRegistry`, `SemanticTypeDef`, `ResolvedField`, `infer_semantic_type()`
+  (reverse inference for import), `resolve_fk_physical()` (an FK column inherits the referenced PK's
+  physical type — shared by emitter, importer and drift), `DEFAULT_REGISTRY` (33 semantic types).
+- **`validation`** — `validate()` → `ValidationReport` (`Finding{rule_id, severity, message, fix}`,
+  SARIF).
+- **`diff`** — `diff()` → `DiffResult.op_dicts()` (the ordered operation list); `three_way_diff()`.
+- **`risk`** — `analyze()` → `RiskReport` (`RiskLevel`, `OperationRisk`, `gate()`, `checklist()`,
+  `to_sarif()`).
+- **`sql_emitter`** — `emit_sql(operations, schema, driver="postgres")` → `SqlScript`
+  (`up_statements()`, `down_statements()`, `requires_backup`).
+- **`design_session`** — `DesignSession`, `SessionStore` (the M1 state machine + approval gate);
+  exceptions `SessionNotFoundError` (404), `InvalidTransitionError` (409), `GateBlockedError` (409).
+- **`suggest`** — `suggest_schema(prd, llm=None)` (greenfield AI suggestion + deterministic normalize).
+- **`importer`** — `introspect_postgres(dsn)` (impure), `build_schema_json()` (pure/deterministic),
+  `apply_sql()` (shadow-DB applier), `split_sql()`, `enrich_ambiguous()`.
+- **`drift`** — `reconcile()`, `three_way_drift()` → `DriftReport` (`DriftEntry`, `to_sarif()`,
+  `exit_code`).
+- **`seeder`** — `seed_data(schema_json, seed, scenario, output)` → `{rows, sql|data, warnings}`;
+  `topological_order()`, `resolve_scenario()`, `SeedError` (NOT NULL FK cycle), `enrich_text()`.
 
-A second, pure (UI-independent — AD-4) engine built to the specs under `docs/` (`README.md`,
-`spec-*.md`, `00-architecture-decisions.md`). It speaks the layered, versioned **`schema_json`**
-format with **Stable IDs** and is the source of truth for the diff/risk/migration pipeline. It has
-no FastAPI/UI dependency, so the same logic powers the API, a future CLI/headless mode, the embedded
-component and the AI-SaaS pipeline. Everything is deterministic; an LLM only ever *suggests* (AD-5).
+### "Controllers" & "views"
+There are no MVC controllers — the HTTP layer is FastAPI route functions defined in
+`register_interactive_routes()` (`routes.py`). The only "view" is the static **canvas** SPA in
+`frontend/` (served at `/canvas`, assets under `/static`).
 
-| Subsystem | Module | Spec | Conformance |
-|-----------|--------|------|-------------|
-| Stable IDs (AD-1) | `core/ids.py` | spec-schema-json-format §8 | `test_schema_json.py` |
-| Layered `schema_json` (AD-3) | `core/schema_json.py` + `schema_json.schema.json` | spec-schema-json-format | `test_schema_json.py` (30) |
-| Type System (AD-2) | `core/type_system.py` | spec-type-system | `test_type_system.py` (27) |
-| Validation Engine | `core/validation.py` | README §5 + spec §10 | `test_validation.py` (17) |
-| Diff Engine | `core/diff.py` | spec-diff-engine | `test_diff.py` (15) |
-| Migration Risk Analyzer | `core/risk.py` | spec-migration-risk-analyzer | `test_risk.py` (24) |
-| State Machine Designer | `core/state_machine.py` | spec-state-machine-designer | `test_state_machine.py` (15) |
+---
 
-Each subsystem ships with a conformance kit; the build order and the "don't advance until 10/10"
-gate from `docs/README.md` §4/§6 were followed. Exposed over HTTP as thin wrappers:
+## 7. Data model: "tables" & relationships
 
-```
-POST /core/validate        schema_json → structural errors + validation report (+ SARIF)
-POST /core/migrate         any-version schema_json → upgraded to the current formatVersion
-POST /core/diff            {from, to[, base]} → typed operation list (+ three-way conflicts)
-POST /core/risk            {from, to | operations} → risk report + safe plans + SARIF + exit code
-POST /core/state-machine   {stateMachine[, schema]} → enum/rules/tests/admin/api/seed/mermaid
-GET  /core/types           the Type Registry (for UI dropdowns)
-```
+**This module does not own any persistent database tables.** It is effectively stateless:
 
-## `/design/*` — Milestone 1: the greenfield pipeline + approval gate
+- The platform's shared Postgres/pgvector is **not** used by this module for its own storage.
+- **Design sessions** (the M1 pipeline) live in an **in-memory** `SessionStore` (a process-local dict);
+  a production deployment would swap this for a persistent store behind the same API. Sessions are lost
+  on restart.
+- The databases this module reads (brownfield `/design/import`, drift `liveDsn`/shadow DB) are the
+  **user's** databases, accessed read-only for introspection (the shadow-DB applier writes only to a
+  throwaway shadow DB the caller provides).
 
-A thin orchestration layer (`app/core/design_session.py`, `suggest.py`, `sql_emitter.py`) on top of
-the Core that proves the end-to-end contract: **PRD → AI suggestion → human apply → validate →
-submit → approve → migration (executable SQL) → handoff**. The session is itself a small state
-machine and *is* the approval gate (AD-5: AI suggests, a human approves):
+The "tables and relationships" this module manages are therefore the **user's designed schema**, in one
+of the two representations above. The canonical, production representation is `schema_json`:
 
-```
-draft ──validate──▶ validated ──submit──▶ pending_approval ──approve──▶ approved
-  ▲                     │                        │
-  └──── edit ───────────┘                        └── reject ──▶ draft
-```
-
-- **Gate rules** (enforced + negatively tested): `/migration` and `/handoff` 409 unless `approved`;
-  `approved` is unreachable past a validation error (re-checked at approve); a **critical** op
-  (e.g. `drop_table`) blocks approval unless `acknowledgeCritical: true`; `approved` is immutable
-  (edit → `revise` starts a new version whose baseline is the approved schema).
-- **SQL Emitter** (`core/sql_emitter.py`, Postgres-only for M1): turns the diff operation list +
-  target schema into ordered `up`/`down` DDL; physical types come from the Type System, driver
-  clauses (`CREATE INDEX CONCURRENTLY`, …) reuse `risk.py`'s data; destructive ops are flagged
-  irreversible + `requiresBackup`.
-- **AI boundary** (`core/suggest.py`): the LLM only runs in `suggest`; its output passes through a
-  deterministic pipeline (assign Stable IDs, resolve semantic types, ensure a PK, drop hallucinated
-  relations, structural-validate). The whole path **works with no LLM** via a domain-aware heuristic.
-- **Determinism**: `validate`/`diff`/`risk`/`sql` are byte-identical for the same draft.
-
-```
-POST /design/sessions                         {mode, prd?, schema_json?} → new session (draft)
-POST /design/sessions/{id}/suggest            → {suggestion, diffFromCurrent, rationale} (NOT applied)
-POST /design/sessions/{id}/apply-suggestion   {schema_json} → draft updated
-POST /design/sessions/{id}/validate           → {state, report:{sarif, summary}}
-POST /design/sessions/{id}/submit             → pending_approval (409 if not validated)
-POST /design/sessions/{id}/approve            {approvedBy, acknowledgeCritical?} → approved | 409 gate_blocked
-POST /design/sessions/{id}/reject / revise    → draft | new revision session
-GET  /design/sessions/{id}[/migration|/handoff]   migration & handoff require state=approved
-GET  /capabilities                            capability manifest (modes, drivers, endpoints)
-```
-
-The M1 acceptance gate lives in `tests/milestones/test_m1_greenfield.py` (marked `conformance`):
-positive path + 4 negative gate tests + determinism + an SQL snapshot, plus an opt-in live-Postgres
-execution test (`VDB_TEST_POSTGRES_DSN`). `tests/conftest.py` fails loudly on the wrong interpreter.
-
-## `/design/import`, `/design/drift` — Milestone 2: brownfield import + three-way drift
-
-The mirror image of M1: read a real database back into the design world, then keep three sources of
-truth honest.
-
-- **Importer** (`app/core/importer.py`) — split into impure `introspect_postgres(dsn)`
-  (`information_schema`/`pg_catalog` → plain `IntrospectedSchema`) and **pure, deterministic**
-  `build_schema_json(...)`. The build assigns Stable IDs from names (so two imports are
-  byte-identical), reverse-infers semantic types (deterministic first, LLM only enriches the
-  ambiguous ones via `enrich_ambiguous`, AD-5), rebuilds relations from real FKs (the FK column's
-  type is read straight from the DB, so it's structurally correct — the inverse of the bug M1
-  caught), detects pivot tables (→ suggest `many_to_many`), preserves real physical types via
-  overrides, and reports schema-quality issues as **warnings, not crashes**.
-- **Three-way drift** (`app/core/drift.py`, pure) — compares **Designed** (A, Stable IDs) ↔
-  **Migrations** (B, a shadow DB the migrations were applied to, then imported) ↔ **Live** (C,
-  introspected). `reconcile` matches legs by name (+ structural similarity with a confidence;
-  ambiguous matches are *flagged*, never guessed) and adopts A's Stable IDs as canonical. Every
-  divergence is classified — `migration_not_applied`, `manual_prod_change`, `design_ahead_of_code`,
-  `code_ahead_of_design`, `migration_incomplete`, `synced` — and carries a **suggested** (never
-  auto-applied) reconciliation. Output projects to SARIF + an exit code (critical drift fails CI).
-- **Shared FK resolution** (`type_system.resolve_fk_physical`, spec §7): M1's emitter fix was
-  promoted to the Type System pipeline, so emitter (forward), importer (reverse) and drift all agree
-  a designed `foreign_key` column resolves to its referenced PK's type (no spurious drift).
-- **Baseline is parametrised** (spec §0): a brownfield session uses the imported schema as *both* the
-  initial draft and the migration baseline (`baselineSource: import`), so editing + migration is a
-  real delta from the live database — the exact mirror of greenfield's empty baseline.
-
-```
-POST /design/import         {dsn, name?, enrich?} → {schema_json, inference:{confident, ambiguous, suggestions}, validation}
-POST /design/sessions       {mode: "brownfield", importDsn | schema_json} → session (baselineSource=import)
-POST /design/drift          {designed, live|liveDsn, migrations|migrationsDsn|(migrationsDir+shadowDsn), sarif?}
-                            → {reconcile:{matched, ambiguous}, drift:[…], summary, exitCode, sarif?}
-```
-
-The M2 gate is `tests/milestones/test_m2_brownfield.py` (`conformance`): import snapshot + determinism,
-the **round-trip** `emit → apply → import → compare` (locks M1↔M2), all drift categories in one report,
-reconcile (no shared id + ambiguous), and opt-in live-Postgres tests (real import, live round-trip, and
-three-way drift over real schemas) that **must pass once** on a server to count as proven.
-
-- **`SchemaDesigner`** (`app/designer.py`) ties the stages together: design → validate → export →
-  suggest improvements.
-- **AI is optional.** With an LLM it asks the model to design the schema and suggest improvements
-  (`app/suggestions.py` + `app/prompts.py`); with no LLM it falls back to **domain-aware templates**
-  (`app/templates.py` — ecommerce / blog / saas / generic) so the module is fully functional offline
-  and tests are deterministic.
-- **Validation** (`app/validators.py`) is deterministic and LLM-free: primary keys, FK targets,
-  duplicate names, missing indexes, naming conventions → `{valid, errors, warnings}`.
-- **Exporters** (`app/exporters.py`): `SQLExporter`, `LaravelMigrationExporter`, `PrismaExporter`,
-  `MermaidExporter`, `OpenAPIExporter`.
-- **Importers** (`app/parsers.py`): `SQLParser` (CREATE TABLE dump) and `LaravelMigrationParser`
-  (`Schema::create` code) for brownfield "design from an existing database".
-- **`SchemaComparator`** (`app/comparators.py`) diffs two versions (added/removed/changed
-  tables + fields) for version history.
-
-## Endpoints
-
-Pipeline contract (used by the orchestrator):
-
-| Method | Path        | Purpose |
-|--------|-------------|---------|
-| GET    | `/manifest` | module self-description |
-| GET    | `/health`   | liveness |
-| POST   | `/run`      | `feature_request` → `database_schema` |
-
-Interactive endpoints (used by the canvas / direct callers):
-
-| Method | Path              | Purpose |
-|--------|-------------------|---------|
-| POST   | `/design`         | `{feature_request}` → `{database_schema}` (validated + exported) |
-| POST   | `/validate`       | `{schema}` → `{validation}` |
-| POST   | `/export`         | `{schema, type}` → `{content}` (`type`: sql\|migration\|prisma\|mermaid\|openapi · **django\|sqlalchemy\|typeorm\|sequelize**) |
-| POST   | `/import`         | `{type, data}` → `{database_schema}` (`type`: sql\|migration) |
-| POST   | `/generate/model` | `{schema, framework, table}` → `{content}` — ORM model/entity class |
-| POST   | `/generate/crud`  | `{schema, framework, table, methods}` → `{content}` — CRUD controller |
-| GET    | `/frameworks`     | supported `{export, model, crud, crud_methods}` lists (UI dropdowns) |
-| GET    | `/field-presets`  | common-column suggestions `{presets:[{label, category, field}]}` |
-| POST   | `/compare`        | `{old, new}` → `{diff, migration}` — schema-version diff + SQL migration |
-| GET    | `/canvas`         | the drag & drop designer page (static frontend) |
-
-`/export` `type` also accepts **`markdown`** (a data-dictionary doc).
-
-### Enhancements (Phase 6F enhancement roadmap — Phase 1)
-
-The canvas and generators were extended (`Docs/PHASE-6F-ENHANCEMENTS.md`, the HIGH-priority set):
-
-- **Editable canvas** (`frontend/`) — rename / delete / duplicate tables; click any column to edit
-  its name, type, length, constraints (PK / auto-increment / nullable / unique / indexed), default and
-  enum values; add / delete columns; click a relationship edge to set its **type** (1:1 / 1:∞ / ∞:1 /
-  ∞:∞ / polymorphic) and `on_delete` / `on_update`. Tabs: **Design** / **ERD** (Mermaid render) /
-  **Code**.
-- **Multi-framework code generation** (`app/generators.py`):
-  - **Schema export** (#4) adds Django, SQLAlchemy, TypeORM and Sequelize on top of the canonical
-    SQL / Laravel / Prisma / Mermaid / OpenAPI.
-  - **Model generation** (#21) — `generate_model(schema, framework, table)` for Laravel (Eloquent),
-    TypeORM, SQLAlchemy, Django and Prisma, with relationships, casts, `$hidden`, timestamps and
-    soft-deletes derived from the schema.
-  - **CRUD controllers** (#22) — `generate_crud(schema, framework, table, methods)` for Laravel,
-    Express (TypeScript) and Django REST, with validation, error handling, pagination, password
-    hashing and proper HTTP status codes.
-
-  All generators are deterministic and LLM-free, and a model + its CRUD controller stay consistent
-  because they key off the same `DatabaseSchema`.
-
-**Phase 2 (Quality of Life)** — canvas UX plus two small backend additions:
-
-- **Table groups / domains** (#6) — `Table.group` (optional metadata, round-trips, ignored by
-  exporters); the canvas assigns a group per table and colour-codes node headers + the minimap, with a
-  legend bar.
-- **Search / filter** (#7) — a toolbar box dims non-matching tables (and their edges) live.
-- **Undo / redo** (#10) — a 50-deep history stack, `Ctrl+Z` / `Ctrl+Y` (and toolbar buttons); snapshots
-  on structural edits (not on drag), skipped while typing in an input.
-- **Zoom controls** (#11) — a ReactFlow `Panel` with +/− / Fit / 100%, on top of the built-in Controls
-  and MiniMap; `minZoom`/`maxZoom` bounded.
-- **Field-type suggestions** (#12) — `app/presets.py` `field_presets()` (a catalog of common columns:
-  id, uuid, email, password, slug, is_active, status enum, price, user_id FK, timestamps, …), served at
-  `GET /field-presets` and offered as an "Apply preset" picker in the column editor.
-
-**Phase 3 (Advanced)** — schema versioning, enums, composite keys, index management and docs:
-
-- **Schema versioning** (#9) — `app/versioning.py` `compare_schemas` (reuses `SchemaComparator`) +
-  `diff_to_migration` (ordered SQL `CREATE` / `ALTER ADD/DROP COLUMN` / `DROP`), served at `POST
-  /compare`. The canvas **Versions** tab saves client-side snapshots and compares any two (or the
-  current working schema) into a migration script.
-- **Reusable enums** (#13) — schema-level `DatabaseSchema.enums` + `SchemaField.enum_ref`;
-  `materialize_enums()` resolves a referenced enum's values into the field before validation/export so
-  every exporter stays enum-agnostic. The column editor references or creates named enums.
-- **Composite keys** (#14) — multiple `primary_key` fields export as `PRIMARY KEY (...)` (SQL),
-  `$table->primary([...])` (Laravel) and `@@id([...])` (Prisma); the table-settings panel shows the
-  current (possibly composite) key.
-- **Index management** (#15) — `Table.indexes` (`Index{name, columns, unique, type}`, `type`:
-  btree|fulltext) export to `CREATE [UNIQUE] INDEX` / GIN fulltext (SQL), `$table->index/unique/fullText`
-  (Laravel) and `@@index/@@unique` (Prisma); managed in the table-settings panel.
-- **Comments / documentation** (#16) — `Table.description` + `SchemaField.description` export as
-  `COMMENT ON …` (SQL) and `->comment()` (Laravel); a new **Markdown data-dictionary** exporter
-  (`/export type=markdown`) lists tables, columns, constraints, indexes, relations and enums.
-
-The full 22-feature enhancement roadmap (`Docs/PHASE-6F-ENHANCEMENTS.md`) is now implemented across
-Phases 1–3.
-
-### `/run` input
-
-```json
+```jsonc
 {
-  "request_id": "uuid",
-  "project_id": "uuid",
-  "mode": "greenfield",
-  "inputs": { "feature_request": "Build a clothing store", "existing_database": null },
-  "context": { "llm": { "gateway_url": "...", "token": "..." } },
-  "settings": { "database_type": "sql", "driver": "postgresql", "ai_suggestions": true }
+  "formatVersion": "1.0.0",
+  "meta":   { "name": "shop", "databaseType": "postgres", "defaultDriver": "postgres" },
+  "logical": {
+    "tables": [
+      { "id": "tbl_…", "name": "users", "kind": "normal", "fields": [
+        { "id": "fld_…", "name": "id",    "semanticType": "uuid",  "isPrimaryKey": true, "nullable": false },
+        { "id": "fld_…", "name": "email", "semanticType": "email", "nullable": false }
+      ]}
+    ],
+    "relations": [
+      { "id": "rel_…", "type": "one_to_many", "fromTableId": "tbl_orders",
+        "toTableId": "tbl_users", "foreignKeyFieldId": "fld_user_id", "onDelete": "cascade" }
+    ],
+    "enums": [ { "id": "enm_…", "name": "order_status", "values": [ {"value": "pending"} ] } ]
+  },
+  "physical":     { "indexes": [ { "id": "idx_…", "tableId": "tbl_…", "columns": ["fld_…"], "unique": true } ] },
+  "semantic":     { "businessRules": [], "stateMachines": [] },
+  "presentation": { "nodes": [ { "tableId": "tbl_…", "x": 60, "y": 80 } ] }
 }
 ```
 
-`feature_request` may arrive as an explicit input **or** via `ctx.settings["feature_request"]` (the
-platform threads brownfield project settings through — the same path the Feature Implementation
-module uses). `settings` keys: `database_type` (sql|nosql|vector), `driver`
-(postgresql|mysql|mongodb|sqlite), `ai_suggestions` (default true), `import_type` (for
-`existing_database`).
+**Relationship types:** `one_to_one`, `one_to_many`, `many_to_one`, `many_to_many`, `polymorphic`
+(and in `schema_json` also `self`, `has_many_through`, `embedded`). Cardinality on import is inferred
+from FK-column uniqueness; pivot tables (two single-column FKs whose composite PK is exactly those two
+columns) are detected and a `many_to_many` is *suggested*.
 
-### `/run` output (`database_schema`)
+---
 
-```json
-{
-  "id": "template-ecommerce", "version": 1, "type": "sql", "driver": "postgresql",
-  "tables": [ { "name": "users", "fields": [ ... ], "relations": [ ... ] } ],
-  "relations": [ ... ],
-  "validation": { "valid": true, "errors": [], "warnings": [ ... ] },
-  "exports": { "sql": "CREATE TABLE ...", "migration": "...", "prisma": "...", "mermaid": "...", "openapi": "..." },
-  "suggestions": [ "Add an index on ..." ]
-}
+## 8. API endpoints
+
+All endpoints are served by the single FastAPI app on **port 9107**.
+
+### Module Protocol (used by the orchestrator)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET  | `/manifest` | module self-description |
+| GET  | `/health`   | liveness `{status, module, version}` |
+| POST | `/run`      | `feature_request` → `database_schema` (the pipeline contract) |
+
+### Simple designer / canvas endpoints
+
+| Method | Path | Body → Result |
+|---|---|---|
+| POST | `/design`         | `{feature_request, settings?, existing_database?}` → `{database_schema}` |
+| POST | `/validate`       | `{schema}` → `{validation:{valid,errors,warnings}}` |
+| POST | `/export`         | `{schema, type}` → `{content}` — `type`: `sql`\|`migration`\|`prisma`\|`mermaid`\|`openapi`\|`markdown`\|`django`\|`sqlalchemy`\|`typeorm`\|`sequelize` |
+| POST | `/import`         | `{type, data}` → `{database_schema}` — `type`: `sql`\|`migration` (regex parsers) |
+| POST | `/generate/model` | `{schema, framework, table}` → `{content}` — ORM model class |
+| POST | `/generate/crud`  | `{schema, framework, table, methods?}` → `{content}` — CRUD controller |
+| GET  | `/frameworks`     | supported `{export, model, crud, crud_methods}` lists |
+| GET  | `/field-presets`  | common-column catalog for the canvas |
+| POST | `/compare`        | `{old, new}` → `{diff, migration}` — version diff + SQL migration |
+| GET  | `/canvas`         | the drag & drop designer page |
+
+### Core (deterministic `schema_json`) endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/core/migrate`       | upgrade a payload to the current `formatVersion` + structural errors |
+| POST | `/core/validate`      | `{structuralErrors, report, sarif?}` |
+| POST | `/core/diff`          | operation list (+ `threeWay` if `base` supplied) |
+| POST | `/core/risk`          | migration risk report (+ `checklist`, `sarif?`) |
+| POST | `/core/state-machine` | derive all outputs from a state-machine definition |
+| GET  | `/core/types`         | the Type Registry (id, category, physical, pii) |
+
+### Design-session pipeline (Milestone 1 — greenfield + approval gate)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/sessions`                       | `{mode, prd?, schema_json?}` → new session (`draft`) |
+| POST | `/design/sessions/{id}/suggest`          | AI suggestion `{suggestion, diffFromCurrent, rationale}` (NOT applied) |
+| POST | `/design/sessions/{id}/apply-suggestion` | `{schema_json}` → draft updated |
+| POST | `/design/sessions/{id}/validate`         | `{state, report:{sarif, summary, structuralErrors}}` |
+| POST | `/design/sessions/{id}/submit`           | → `pending_approval` (409 if not validated) |
+| POST | `/design/sessions/{id}/approve`          | `{approvedBy, acknowledgeCritical?}` → `approved` \| 409 `gate_blocked` |
+| POST | `/design/sessions/{id}/reject`           | → `draft` |
+| POST | `/design/sessions/{id}/revise`           | → a new editable revision (baseline = approved schema) |
+| GET  | `/design/sessions/{id}`                  | the session view |
+| GET  | `/design/sessions/{id}/migration`        | risk-checked up/down DDL — **409 unless approved** |
+| GET  | `/design/sessions/{id}/handoff`          | the approved handoff artifact (+ checksum) — **409 unless approved** |
+
+### Brownfield (Milestone 2 — import + drift)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/import`                  | `{dsn, name?, enrich?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}` |
+| POST | `/design/sessions` (brownfield)   | `{mode:"brownfield", importDsn \| schema_json}` → session with `baselineSource:"import"` |
+| POST | `/design/drift`                   | `{designed, live\|liveDsn, migrations\|migrationsDsn\|(migrationsDir+shadowDsn), sarif?}` → `{reconcile, drift, summary, exitCode, sarif?}` |
+| GET  | `/capabilities`                   | capability manifest (modes, drivers, drift categories, scenarios, guarantees) |
+
+### Scenario seeder (Milestone 3)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/seed` | `{schema_json \| handoff, seed?, scenario?, output: sql\|json, enrich?}` → `{rows, sql\|data, warnings}` — deterministic, FK/enum/state-consistent data (preset scenarios: `ecommerce_medium`, `multi_tenant`, `ticketing`) |
+
+---
+
+## 9. Admin panel & frontend behavior
+
+**Admin panel:** this module has no admin panel of its own. The platform's Laravel **Panel** service
+(port 9000) provides the user-facing UI and proxies to this module; the brownfield/analyze UI and the
+result tabs live there. This module simply exposes machine + canvas endpoints.
+
+**Frontend (the canvas):** `frontend/` is a **no-build-step** React Flow single-page app:
+
+- `index.html` loads React 18, ReactDOM, React Flow (v11) and Mermaid from CDNs via an **import map** —
+  there is no bundler. `canvas.js` is the entry module; `components/TableNode.js` renders a table node.
+- It talks to the module's **own** endpoints (same origin): `POST /design` to generate, `/validate`,
+  `/export`, `/generate/model|crud`, `/field-presets`, `/compare`.
+- Behaviors: generate from a prompt; edit/rename/delete/duplicate tables; colour-coded groups + minimap
+  + legend; click a column to edit type/length/constraints/default/enum and apply field presets; click
+  an edge to set relationship type + referential actions; reusable enums; composite keys; explicit
+  indexes; table/column comments; search/filter (dims non-matches); undo/redo (50-deep, `Ctrl+Z` /
+  `Ctrl+Y`); zoom controls. Tabs: **Design**, **ERD** (live Mermaid render), **Code** (export + generate),
+  **Versions** (client-side snapshots compared into a migration script).
+- Theme: a single `styles.css`; no theming system or dark mode toggle.
+
+---
+
+## 10. Business rules
+
+- **AD-5 / Approval gate (the central rule).** No migration or handoff artifact is ever produced from a
+  session that is not `approved`. The session is a state machine:
+  ```
+  draft ──validate──▶ validated ──submit──▶ pending_approval ──approve──▶ approved
+    ▲                     │                        │
+    └──── edit ───────────┘                        └── reject ──▶ draft
+  ```
+  - Any edit to a draft drops it back to `draft` and clears the last validation (must re-validate).
+  - `submit` requires `validated`; `approve` requires `pending_approval` (else 409).
+  - **Approve has three gates:** (1) an approver identity must be present; (2) validation is *re-checked*
+    at the moment of approval and must be green; (3) no **critical**-risk migration operation (e.g.
+    `drop_table`) may proceed unless the caller passes `acknowledgeCritical: true`.
+  - `approved` is **immutable** — editing requires `revise`, which opens a new session whose baseline is
+    the approved schema (so a later migration is a true delta).
+- **Baseline is parametrised** (the migration delta source): empty for **greenfield**, the approved
+  schema for a **revise**, the imported live schema for **brownfield** (`baselineSource: import`, where
+  the imported schema is *both* the draft and the baseline).
+- **AI boundary.** The LLM only runs in `suggest` (and the optional import `enrich`); its output passes
+  through a deterministic normalize pipeline (assign Stable IDs, resolve semantic types, ensure a PK,
+  drop hallucinated relations) and is *never* auto-applied — a human applies it.
+- **Drift is report-only.** Three-way drift never fixes anything; each divergence carries a *suggested*
+  reconciliation. Drift categories and their CI severity:
+  | Category | A (designed) | B (migrations) | C (live) | severity | suggestion |
+  |---|---|---|---|---|---|
+  | `synced`                | ✓ | ✓ | ✓ | none (not reported) | — |
+  | `migration_not_applied` | ✓ | ✓ | ✗ | warning | `apply_migration` |
+  | `manual_prod_change`    | ✗ | ✗ | ✓ | **error** | `import_to_design` |
+  | `design_ahead_of_code`  | ✓ | ✗ | ✗ | note | `generate_migration` |
+  | `code_ahead_of_design`  | ✗ | ✓ | ✓ | warning | `import_to_design` |
+  | `migration_incomplete`  | ✓ | ✓ | partial | **error** | `apply_migration` |
+
+  `DriftReport.exit_code` is `1` if any **error**-severity drift exists (so CI fails on untracked prod
+  changes or half-applied migrations).
+- **FK type correctness.** A foreign-key column's physical type is dictated by the referenced primary
+  key (`type_system.resolve_fk_physical`); the emitter renders FK columns with the PK's type, the
+  importer reads the real type, and drift uses the same resolution so a designed `foreign_key` column
+  never shows as spurious drift against a live `uuid` column.
+- **Imports never crash on imperfect databases.** A real DB that violates a quality rule (e.g. a
+  PK-less table) is reported as a *warning*, not an error.
+- **Migration safety.** Two-phase apply (create tables → indexes → FKs); destructive ops are flagged
+  irreversible + `requiresBackup`; `CREATE INDEX CONCURRENTLY` is emitted outside a transaction.
+
+---
+
+## 11. Validation rules
+
+There are **two validators**, one per layer.
+
+### Simple-layer `SchemaValidator` (`validators.py`) — `{valid, errors, warnings}`
+- **Errors:** no tables; table/field not a valid identifier; table name > 64 chars; duplicate table;
+  table with no fields; duplicate field; table with no primary key; relation target table not found.
+- **Warnings:** reserved SQL word as a name; composite primary key (confirm intentional); relation
+  `from_field`/`to_field` not declared; `*_id` field not indexed; unique field not indexed; non-lowercase
+  (snake_case) table/field names.
+
+### Core Validation Engine (`core/validation.py`) — SARIF, stable rule IDs, suppressible
+Every finding has a stable `rule_id`, a `severity` (`error`/`warning`/`suggestion`/`security`/
+`performance`), a message and often a `fix`. Findings can be suppressed globally or inline via
+`vdb-ignore: <rule-id>` in an entity comment. A report is `valid` iff there are **zero error-severity**
+findings.
+
+- **Referential (errors):** `REF001`–`REF004` relation table/field references; `REF010`/`REF011` index
+  table/columns; `REF020` enum reference; `REF030`–`REF032` ownership/tenancy field references
+  (warnings).
+- **Quality:** `QLT001` table has no primary key (warning); `QLT002` duplicate field name (error);
+  `QLT010` email not covered by a unique index (warning); `QLT011` money stored as float (warning);
+  `QLT020` unregistered semantic type (warning); `QLT030` FK-shaped relation with no explicit FK field
+  (suggestion).
+- **Security:** `SEC001` password field not masked.
+- **Performance:** `PRF001` foreign-key field not indexed.
+- **State machines:** `SM001`–`SM009` (field binding + structural checks, shared with
+  `state_machine.py`).
+
+**Structural validation** is separate: `schema_json.schema.json` (a bundled JSON Schema) enforces shape,
+id patterns and required fields, independent of the referential/quality rules above.
+
+---
+
+## 12. Data flow
+
+**Greenfield via the platform pipeline (`/run`):**
+```
+feature_request ─▶ SchemaDesigner.design()
+   ├─ LLM available → SchemaSuggestions.suggest_schema (LLM) ──┐
+   └─ no LLM        → build_template_schema (offline) ─────────┤
+                                                               ▼
+                              DatabaseSchema ─▶ materialize_enums
+                                  ├─ SchemaValidator.validate  → {valid,errors,warnings}
+                                  ├─ export_all                → {sql,migration,prisma,mermaid,openapi,markdown}
+                                  └─ suggest_improvements      → [advice]
+                                                               ▼
+                                                    DatabaseSchemaResult (database_schema)
 ```
 
-## Develop
+**Greenfield approval pipeline (`/design/*`, Milestone 1):**
+```
+POST /design/sessions ─▶ suggest (LLM, optional) ─▶ apply-suggestion ─▶ validate ─▶ submit
+   ─▶ approve (3 gates) ─▶ [approved] ─▶ migration (diff → risk → SQL) ─▶ handoff (+checksum)
+```
 
-Run from this directory with the SDK virtualenv (system Python lacks the deps):
+**Brownfield import + drift (Milestone 2):**
+```
+/design/import:  introspect_postgres(dsn) ─▶ build_schema_json (Stable IDs, reverse-inference,
+                 relations from FKs, pivots, enums, checks) ─▶ {schema_json, inference, validation}
+
+/design/drift:   designed (A, authored)         ┐
+                 migrations (B = shadow DB,      ├─▶ reconcile (match by name + structural) ─▶
+                   migrations applied + imported)│    three_way_drift ─▶ {drift[], summary,
+                 live (C = introspect prod)      ┘                        exitCode, sarif}
+```
+
+---
+
+## 13. Usage examples
+
+**Run the service locally (from the repo root, using the SDK virtualenv):**
+```bash
+packages/module-sdk-python/.venv/Scripts/python.exe -m uvicorn app.main:app \
+  --app-dir services/modules/visual-database-designer --port 9107
+# open http://localhost:9107/canvas
+```
+
+**Design a schema (pipeline contract):**
+```bash
+curl -X POST localhost:9107/run -H 'content-type: application/json' -d '{
+  "request_id":"r1","project_id":"p1","mode":"greenfield",
+  "inputs":{"feature_request":"An online clothing store with products, orders and customers"},
+  "settings":{"database_type":"sql","driver":"postgresql","ai_suggestions":true}
+}'
+```
+
+**Export an existing schema to a Laravel migration:**
+```bash
+curl -X POST localhost:9107/export -H 'content-type: application/json' \
+  -d '{"schema": {...DatabaseSchema...}, "type":"migration"}'
+```
+
+**Greenfield approval pipeline (no LLM — supply the schema directly):**
+```bash
+SID=$(curl -s -X POST localhost:9107/design/sessions -d '{"schema_json": {...}}' | jq -r .sessionId)
+curl -X POST localhost:9107/design/sessions/$SID/validate
+curl -X POST localhost:9107/design/sessions/$SID/submit
+curl -X POST localhost:9107/design/sessions/$SID/approve -d '{"approvedBy":"alice"}'
+curl       localhost:9107/design/sessions/$SID/migration   # up/down DDL (only now, post-approval)
+```
+
+**Import a live database, then detect drift:**
+```bash
+curl -X POST localhost:9107/design/import -d '{"dsn":"postgresql://user:pw@host/db"}'
+curl -X POST localhost:9107/design/drift -d '{
+  "designed": {...schema_json...},
+  "liveDsn": "postgresql://user:pw@prod/db",
+  "migrationsDir": "/migrations", "shadowDsn": "postgresql://user:pw@shadow/db",
+  "sarif": true
+}'
+```
+
+---
+
+## 14. Configuration
+
+**Environment variables** (see `docker-compose.yml`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEFAULT_LLM_PROVIDER` | `ollama` | LLM provider (the platform's provider abstraction) |
+| `DEFAULT_LLM_MODEL`    | `neural-chat-local:latest` | default model |
+| `OLLAMA_BASE_URL`      | `http://ollama:11434` | Ollama endpoint |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | optional cloud LLM keys |
+
+The LLM is reached via the SDK's standalone gateway (`env_llm_port()`); when none is configured the
+module runs fully offline (templates + heuristics + deterministic Core).
+
+**`/run` settings** (per request): `database_type` (`sql`|`nosql`|`vector`), `driver`
+(`postgresql`|`mysql`|`mongodb`|`sqlite`), `ai_suggestions` (default `true`), `import_type` (for
+`existing_database`), and `feature_request` (may be threaded via `ctx.settings`).
+
+**Driver support note:** the simple-layer exporters support several drivers; the **Core** SQL emitter,
+importer and drift are **Postgres-only** (Milestone scope). Live import/drift require a reachable
+Postgres DSN and the `psycopg` driver.
+
+**Container:** `Dockerfile` builds on `python:3.12-slim`, installs the SDK then `requirements.txt`,
+copies `app/` + `frontend/`, runs as a non-root user, exposes `9107`, and health-checks `/health`.
+The build context **must be the repository root** (it needs `packages/module-sdk-python`).
+
+---
+
+## 15. Dependencies
+
+- **Python 3.12** (the test `conftest.py` fails loudly on anything older or on a missing dependency).
+- **`aiarch_module_sdk`** — the platform's Module Protocol SDK (provides FastAPI, pydantic, httpx,
+  structlog, `build_module_app`, `LLMClient`). Installed from `packages/module-sdk-python`.
+- **`uvicorn[standard]`** — ASGI server.
+- **`jsonschema`** — structural validation of `schema_json` against the bundled JSON Schema. *(Required
+  at import time — without it the service fails to boot.)*
+- **`psycopg[binary]`** — Postgres driver for brownfield import / shadow-DB apply / drift. *(Imported
+  lazily; only needed when actually touching a database.)*
+- **Frontend (CDN, no install):** React 18, ReactDOM, React Flow 11, Mermaid 11.
+
+---
+
+## 16. Known limitations
+
+- **Two schema models.** The simple `DatabaseSchema` and the Core `schema_json` are separate; there is
+  no automatic bridge between them, so the canvas/`/design`/`/export` flow and the `/design/*` Core
+  pipeline operate on different representations.
+- **Design sessions are in-memory.** They do not survive a restart and are not shared across replicas;
+  a persistent store is not yet implemented.
+- **Core SQL emitter / importer / drift are Postgres-only** (Milestone scope). Other drivers exist only
+  in the simple-layer exporters.
+- **Migrations "leg" is raw SQL only.** Three-way drift's Leg B applies raw-SQL files to a shadow DB (or
+  uses a prepared shadow DSN); framework-specific migration runners (Laravel/Prisma/Alembic) are not yet
+  implemented. There is **no ORM-model AST scanner** (that would be a future fourth leg).
+- **Regex-based simple-layer importers** (`SQLParser`, `LaravelMigrationParser`) are lightweight and
+  skip what they can't parse; the production-grade importer is the Core `introspect_postgres`.
+- **No auto-fix and no merge.** Drift reports + suggests only; schema branching is detect-only. The
+  seeder produces data/SQL but never applies it to a database.
+- **Seeder check constraints.** The seeder respects FK/unique/nullable/enum/state-machine constraints,
+  but complex `CHECK` constraints are surfaced as warnings rather than fully solved.
+- **No real-time collaboration**, and no admin UI in this service (the Panel owns user-facing UI).
+- **Composite foreign keys** are handled best-effort on import.
+
+---
+
+## 17. Future improvements
+
+- A **bridge/adapter** between `DatabaseSchema` and `schema_json` so the canvas and the Core pipeline
+  share one representation.
+- **Persistent design sessions** (DB-backed `SessionStore`) for multi-replica/production use.
+- **Multi-driver Core** — extend the SQL emitter, importer and risk rules to MySQL/SQLite/etc.
+- **Framework migration runners** for Leg B (apply Laravel/Prisma/Alembic migrations to the shadow DB
+  via adapters) and an **ORM-model AST scanner** as a fourth drift leg.
+- **Phase-2 generators** driven by the Core Type System (API / Form / Admin / GDPR projections). The
+  **Seeder** (Milestone 3) already ships — it fabricates a real referenced UUID, not an integer, for a
+  UUID FK; remaining generators would join it.
+- **Schema merge / branching** beyond conflict detection.
+- **Richer reconciliation** (auto-generate the migration for `design_ahead_of_code`, propose the
+  `import_to_design` edit for manual prod changes) — still behind the human gate.
+
+---
+
+## 18. Testing
+
+Run from the **module directory** with the SDK virtualenv (the repo's default `python` is 3.10 with no
+deps and will be rejected loudly by `conftest.py`):
 
 ```bash
-# tests
+cd services/modules/visual-database-designer
 ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -q
-# lint
-../../../packages/module-sdk-python/.venv/Scripts/python.exe -m ruff check .
-# run it (then open http://127.0.0.1:9107/canvas)
-../../../packages/module-sdk-python/.venv/Scripts/python.exe -m uvicorn app.main:app --port 9107
-# conformance
-../../../packages/module-sdk-python/.venv/Scripts/conformance-test.exe http://127.0.0.1:9107 --input tests/conformance_sample.json
 ```
 
-67 module tests + ruff clean + conformance green.
-
-## Build & deploy
-
-The Docker build context **must be the repo root** (it needs `packages/module-sdk-python`):
-
-```bash
-docker build -f services/modules/visual-database-designer/Dockerfile -t visual-database-designer .
+- **Unit tests:** `tests/core/` (one file per engine) + `tests/test_module.py`.
+- **Conformance kits** (marked `conformance`): `tests/milestones/test_m1_greenfield.py` (positive path,
+  4 negative gate tests, determinism, SQL snapshot), `tests/milestones/test_m2_brownfield.py` (import
+  snapshot + determinism, the **emit→apply→import** round-trip, all drift categories, reconcile), and
+  `tests/milestones/test_m3_seeder.py` (FK-type proof, state-machine consistency, determinism, and the
+  **schema→migration→apply→seed→insert** full loop on a real server).
+- **Live-Postgres tests** (marked `live_postgres`) are opt-in but must pass once on a real server to
+  count as proven — set `VDB_TEST_POSTGRES_DSN`, e.g.:
+  ```bash
+  docker run --rm -d --name vdb-pg -e POSTGRES_PASSWORD=vdb -p 5433:5432 postgres:16
+  VDB_TEST_POSTGRES_DSN="postgresql://postgres:vdb@localhost:5433/postgres" \
+    ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_postgres -v
+  ```
+- Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`. Lint with
+  `ruff check app tests`.
 ```
-
-Wired into `docker-compose.yml` (service `visual-database-designer`, port 9107),
-`infrastructure/modules.yml` (registry), and `infrastructure/operations.yml` (the `design_database`
-operation, target `database_schema`). The Panel surfaces it on the **Analyze** page (operation
-"Design database") and renders the result in a **Database Design** tab.
-
-## User guide
-
-1. **Describe** — say what you need (e.g. "a clothing store with products, orders and payments").
-2. **AI suggests** — tables and relationships are designed for you (offline fallback uses a
-   domain-aware template).
-3. **Visualize** — drag & drop the tables on the canvas, add/edit fields, draw relationships.
-4. **Validate** — check for errors and advisory warnings.
-5. **Export** — copy SQL, a Laravel migration, a Prisma schema, a Mermaid ERD or an OpenAPI stub.
-6. **Import** — bootstrap a design from an existing SQL dump or Laravel migration (brownfield).
+Current status: 284 passed + 6 skipped (live, green when run on a server), ruff clean.
+```

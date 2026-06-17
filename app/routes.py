@@ -34,6 +34,7 @@ from app.core import drift as core_drift
 from app.core import importer as core_importer
 from app.core import risk as core_risk
 from app.core import schema_json as core_sj
+from app.core import seeder as core_seeder
 from app.core import state_machine as core_sm
 from app.core import suggest as core_suggest
 from app.core import validation as core_validation
@@ -473,12 +474,37 @@ def register_interactive_routes(app: FastAPI) -> None:
             return _introspect_schema(shadow_dsn, "migrations")
         return None
 
+    @app.post("/design/seed")
+    async def design_seed(request: dict) -> JSONResponse:
+        """Scenario-based seeder (Milestone 3): generate valid, insertable rows for a schema.
+
+        Input is preferably an approved handoff (`{handoff:{schema_json}}`) but a raw `schema_json`
+        works too. Deterministic for a given `seed`; the LLM (if configured) only enriches text.
+        """
+        schema = request.get("schema_json") or (request.get("handoff") or {}).get("schema_json")
+        if schema is None:
+            return JSONResponse({"error": "missing schema_json"}, status_code=400)
+        try:
+            result = core_seeder.seed_data(
+                schema,
+                seed=int(request.get("seed", core_seeder.DEFAULT_SEED)),
+                scenario=request.get("scenario"),
+                output=request.get("output", "sql"),
+            )
+        except core_seeder.SeedError as exc:
+            return JSONResponse({"error": "unseedable", "detail": str(exc)}, status_code=422)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if request.get("enrich"):
+            result = await core_seeder.enrich_text(result, _env_llm())
+        return JSONResponse(result)
+
     @app.get("/capabilities")
     async def capabilities() -> JSONResponse:
         """Capability manifest for the Designer expert module (spec §3)."""
         return JSONResponse({
             "module": "visual_database_designer",
-            "milestone": "m2-brownfield",
+            "milestone": "m3-scenario-seeder",
             "modes": ["greenfield", "brownfield"],
             "drivers": list(SUPPORTED_DRIVERS),
             "sessionStates": [s.value for s in SessionState],
@@ -492,14 +518,17 @@ def register_interactive_routes(app: FastAPI) -> None:
                            "/design/sessions/{id}/reject", "/design/sessions/{id}/revise",
                            "/design/sessions/{id}/migration", "/design/sessions/{id}/handoff"],
                 "brownfield": ["/design/import", "/design/sessions (mode=brownfield)", "/design/drift"],
+                "seeder": ["/design/seed"],
             },
             "driftCategories": ["synced", "migration_not_applied", "manual_prod_change",
                                 "design_ahead_of_code", "code_ahead_of_design", "migration_incomplete"],
+            "scenarios": ["ecommerce_medium", "multi_tenant", "ticketing"],
             "guarantees": {
-                "deterministic": "validate/diff/risk/sql AND import are byte-identical for the same input",
+                "deterministic": "validate/diff/risk/sql, import AND seed are byte-identical for the same input/seed",
                 "approvalGate": "migration & handoff require state=approved",
                 "aiBoundary": "the LLM only suggests/enriches; the rest of the pipeline is LLM-free",
                 "driftSafety": "drift is report-only; every reconciliation is a human-approved suggestion",
+                "seedSafety": "the seeder produces data/SQL; applying it is an explicit step (no auto-apply)",
             },
         })
 
