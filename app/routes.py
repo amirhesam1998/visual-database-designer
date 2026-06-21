@@ -13,27 +13,33 @@ for the drag & drop canvas to call directly:
   GET  /frameworks      — supported export/model/crud frameworks (for the UI dropdowns)
   GET  /field-presets   — common-column suggestions for the canvas (#12)
   POST /compare         — {old, new} → {diff, migration} (schema versioning, #9)
-  GET  /canvas          — the drag & drop designer page (static frontend)
 
 These are additive and standalone-friendly: /design synthesizes an LLM client from the module's own
 environment (falling back to the offline heuristic when no LLM is configured).
+
+The interactive visual designer is the built React SPA served at ``/designer`` (``frontend-canvas``).
+The original no-build ``/canvas`` SPA has been removed — ``/designer`` is now the sole UI reference,
+and these REST endpoints remain as the module's stable, framework-agnostic API surface.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from aiarch_module_sdk import LLMClient
 from aiarch_module_sdk.standalone import env_llm_port
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core import api_client as core_api_client
 from app.core import api_contract as core_api_contract
 from app.core import api_server as core_api_server
+from app.core import codegen_bridge as core_codegen
 from app.core import diff as core_diff
 from app.core import drift as core_drift
+from app.core import e2e as core_e2e
 from app.core import importer as core_importer
 from app.core import risk as core_risk
 from app.core import schema_json as core_sj
@@ -49,8 +55,8 @@ from app.core.design_session import (
     SessionStore,
 )
 from app.core.schema_json import SchemaJson, StateMachine
-from app.core.sql_emitter import SUPPORTED_DRIVERS
-from app.core.type_system import DEFAULT_REGISTRY
+from app.core.sql_emitter import SUPPORTED_DRIVERS, emit_sql
+from app.core.type_system import DEFAULT_REGISTRY, resolve_fk_physical
 from app.designer import SchemaDesigner
 from app.exporters import EXPORTERS, export_one
 from app.generators import (
@@ -65,7 +71,7 @@ from app.schema_model import DatabaseSchema
 from app.validators import SchemaValidator
 from app.versioning import compare_schemas, diff_to_migration
 
-_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+_CANVAS_DIST = Path(__file__).resolve().parent.parent / "frontend-canvas" / "dist"
 
 # In-memory design-session store (Milestone 1). Module-level so it survives across requests within a
 # process; the production deployment would swap this for a persistent store behind the same API.
@@ -255,6 +261,159 @@ def register_interactive_routes(app: FastAPI) -> None:
         schema = _load_core(request) if request.get("schema") else None
         return JSONResponse(core_sm.derive_all(sm, schema))
 
+    # ---------------------------------------------------------------------------------------------
+    # Canvas render projection (Canvas Milestone 1, read-only) — a thin, deterministic *view* over a
+    # schema_json for the visual designer. It computes NOTHING new: it reuses the Type System's
+    # existing resolution (``DEFAULT_REGISTRY.resolve`` + ``resolve_fk_physical``) so the canvas never
+    # re-derives database logic in the front-end (spec §0/§7) and a foreign-key column shows its
+    # referenced primary key's physical type (a uuid FK renders as ``uuid``, never an integer — the
+    # lesson of the whole project). Read-only: it never mutates state or the schema.
+    # ---------------------------------------------------------------------------------------------
+    def _physical_label(physical: dict) -> str:
+        base = physical.get("type", "")
+        if physical.get("length"):
+            return f"{base}({physical['length']})"
+        if physical.get("precision") is not None:
+            scale = physical.get("scale", 0)
+            return f"{base}({physical['precision']},{scale})"
+        if physical.get("dimension"):
+            return f"{base}({physical['dimension']})"
+        return base
+
+    def _render_model(schema: SchemaJson) -> dict:
+        # FK fields inherit the referenced PK's physical type (one shared resolution).
+        fk_physical = resolve_fk_physical(schema)
+        fk_field_ids = {
+            rel.foreign_key_field_id
+            for rel in schema.logical.relations
+            if rel.foreign_key_field_id
+        }
+        tables = []
+        for table in schema.logical.tables:
+            fields = []
+            for field in table.fields:
+                physical: dict = {}
+                pii = False
+                sensitivity = None
+                try:
+                    resolved = DEFAULT_REGISTRY.resolve(field)
+                    physical = dict(resolved.physical)
+                    pii = bool(resolved.privacy.get("pii"))
+                    sensitivity = resolved.privacy.get("sensitivity")
+                except KeyError:
+                    physical = {"type": field.semantic_type}  # unregistered type → show as-is
+                if field.id in fk_physical:  # FK column takes the referenced PK's physical type
+                    physical = dict(fk_physical[field.id])
+                fields.append({
+                    "id": field.id,
+                    "name": field.name,
+                    "semanticType": field.semantic_type,
+                    "physicalType": _physical_label(physical),
+                    "nullable": field.nullable,
+                    "isPrimaryKey": field.is_primary_key,
+                    "isForeignKey": field.id in fk_field_ids,
+                    "pii": pii,
+                    "sensitivity": sensitivity,
+                    "enumId": field.enum_id,
+                    "comment": field.comment,
+                })
+            tables.append({
+                "id": table.id,
+                "name": table.name,
+                "comment": table.comment,
+                "kind": table.kind,
+                "fields": fields,
+            })
+        relations = [
+            {
+                "id": rel.id,
+                "type": rel.type,
+                "fromTableId": rel.from_table_id,
+                "toTableId": rel.to_table_id,
+                "foreignKeyFieldId": rel.foreign_key_field_id,
+                "onDelete": rel.on_delete,
+                "onUpdate": rel.on_update,
+            }
+            for rel in schema.logical.relations
+        ]
+        nodes = []
+        if schema.presentation is not None:
+            nodes = [
+                {"tableId": n.table_id, "x": n.x, "y": n.y, "color": n.color, "group": n.group}
+                for n in schema.presentation.nodes
+            ]
+        enums = [
+            {"id": e.id, "name": e.name, "values": [v.value for v in e.values]}
+            for e in schema.logical.enums
+        ]
+        return {
+            "meta": (schema.meta.model_dump(by_alias=True, exclude_none=True) if schema.meta else {}),
+            "tables": tables,
+            "relations": relations,
+            "enums": enums,
+            "presentation": {"nodes": nodes},
+            "hasLayout": len(nodes) > 0,
+        }
+
+    @app.post("/design/render")
+    async def design_render(request: dict) -> JSONResponse:
+        """Read-only render projection for the visual canvas (Canvas M1).
+
+        Accepts a ``schema_json`` (or ``handoff`` with one), or a ``sessionId`` to render the current
+        draft. Returns resolved-type tables, directional relations and presentation positions — no
+        editing, no engine logic in the caller.
+        """
+        if request.get("sessionId") or request.get("session_id"):
+            sid = request.get("sessionId") or request.get("session_id")
+            try:
+                session = _SESSIONS.get(sid)
+            except SessionNotFoundError as exc:
+                return _session_error(exc)
+            schema = core_sj.load(session.schema_doc, validate=False)
+        else:
+            payload = request.get("schema_json") or request.get("handoff", {}).get("schema_json") \
+                if isinstance(request.get("handoff"), dict) else request.get("schema_json")
+            if payload is None:
+                payload = request.get("schema") or request
+            try:
+                schema = core_sj.load(core_sj.migrate(payload), validate=False)
+            except Exception as exc:  # noqa: BLE001 - malformed input → 400, not 500
+                return JSONResponse({"error": "invalid_schema_json", "detail": str(exc)}, status_code=400)
+        return JSONResponse(_render_model(schema))
+
+    @app.post("/design/presentation")
+    async def design_presentation(request: dict) -> JSONResponse:
+        """Save canvas layout into the ``presentation`` layer (Canvas M2 §4).
+
+        Layout is display-only and NOT schema-affecting (the diff engine ignores ``presentation``),
+        so this is intentionally separate from the edit/validate cycle — moving a table never counts
+        as a schema change. With a ``sessionId`` the layout is persisted onto the session's draft
+        without altering its state; otherwise the supplied ``schema_json`` is echoed back with the
+        layout merged in (stateless mode, used by the sample/standalone canvas). This is the single
+        thin endpoint the spec permits for presentation (spec §8).
+        """
+        nodes = request.get("nodes")
+        if nodes is None:
+            return JSONResponse({"error": "missing nodes"}, status_code=400)
+        sid = request.get("sessionId") or request.get("session_id")
+        if sid:
+            try:
+                session = _SESSIONS.update_presentation(sid, nodes)
+            except SessionNotFoundError as exc:
+                return _session_error(exc)
+            return JSONResponse({"schema_json": session.schema_doc, "persisted": True})
+        payload = request.get("schema_json") or request.get("schema")
+        if payload is None:
+            return JSONResponse({"error": "missing schema_json or sessionId"}, status_code=400)
+        try:
+            doc = core_sj.migrate(payload)
+        except Exception as exc:  # noqa: BLE001 - malformed input → 400, not 500
+            return JSONResponse({"error": "invalid_schema_json", "detail": str(exc)}, status_code=400)
+        presentation = dict(doc.get("presentation") or {})
+        presentation["nodes"] = nodes
+        doc["presentation"] = presentation
+        return JSONResponse({"schema_json": doc, "persisted": False})
+
     @app.get("/core/types")
     async def core_types() -> JSONResponse:
         return JSONResponse({
@@ -409,17 +568,39 @@ def register_interactive_routes(app: FastAPI) -> None:
 
     @app.post("/design/import")
     async def design_import(request: dict) -> JSONResponse:
-        """Introspect a live Postgres database into a Stable-ID schema_json (Milestone 2 §1).
+        """Import an existing database into a Stable-ID schema_json (Milestone 2 §1 + file import).
 
-        Deterministic reverse-inference first; when an LLM is configured it only *enriches* the
-        ambiguous columns (the result still carries them as suggestions for the human to confirm).
+        Two sources, both reusing the M2 importer so reverse-inference is identical (a uuid FK stays
+        ``uuid``):
+
+        * **live** — ``dsn`` introspects a running Postgres directly.
+        * **file** — ``sql``/``ddl`` (a ``CREATE TABLE`` dump) is applied to a temporary *shadow*
+          database, which is then introspected. The shadow DSN comes from the request (``shadowDsn``)
+          or the ``VDB_SHADOW_DSN`` env var; the user's real database is never written to.
+
+        Deterministic reverse-inference first; when an LLM is configured (``enrich``) it only refines
+        the ambiguous columns (still carried as suggestions for the human to confirm — AD-5).
         """
-        dsn = request.get("dsn")
-        if not dsn:
-            return JSONResponse({"error": "missing dsn"}, status_code=400)
+        name = request.get("name", "imported")
+        sql = request.get("sql") or request.get("ddl")
         try:
-            result = _import_db(dsn, request.get("name", "imported"))
-        except Exception as exc:  # noqa: BLE001 - DB/driver errors are client-fixable → 400
+            if sql is not None:
+                shadow_dsn = (
+                    request.get("shadowDsn") or request.get("shadow_dsn") or os.getenv("VDB_SHADOW_DSN")
+                )
+                if not shadow_dsn:
+                    return JSONResponse(
+                        {"error": "shadow_db_unavailable",
+                         "detail": "file import needs a shadow database; set VDB_SHADOW_DSN or pass shadowDsn"},
+                        status_code=400,
+                    )
+                result = core_importer.import_sql_via_shadow(sql, shadow_dsn, name=name)
+            else:
+                dsn = request.get("dsn")
+                if not dsn:
+                    return JSONResponse({"error": "missing dsn or sql"}, status_code=400)
+                result = _import_db(dsn, name)
+        except Exception as exc:  # noqa: BLE001 - DB/driver/SQL errors are client-fixable → 400
             return JSONResponse({"error": "import_failed", "detail": str(exc)}, status_code=400)
         if request.get("enrich"):
             result = await core_importer.enrich_ambiguous(result, _env_llm())
@@ -502,6 +683,36 @@ def register_interactive_routes(app: FastAPI) -> None:
             result = await core_seeder.enrich_text(result, _env_llm())
         return JSONResponse(result)
 
+    @app.post("/design/run-e2e")
+    async def design_run_e2e(request: dict) -> JSONResponse:
+        """End-to-end integration: run the whole chain (suggest → approval → migration → seed → API) on
+        a real Postgres and report each step. Pure orchestration over the existing subsystems — the
+        approval gate is the only pause (set `autoApprove` for automated runs). Requires a real `dsn`.
+        """
+        dsn = request.get("dsn")
+        if not dsn:
+            return JSONResponse({"error": "missing dsn"}, status_code=400)
+        mode = request.get("mode", "greenfield")
+        if mode not in {"greenfield", "brownfield"}:
+            return JSONResponse({"error": f"unsupported mode {mode!r}"}, status_code=400)
+        try:
+            result = await core_e2e.run_e2e(
+                _SESSIONS,
+                mode=mode,
+                dsn=dsn,
+                prd=request.get("prd"),
+                schema_json=request.get("schema_json"),
+                auto_approve=bool(request.get("autoApprove") or request.get("auto_approve")),
+                seed=int(request.get("seed", core_seeder.DEFAULT_SEED)),
+                scenario=request.get("scenario"),
+                version=request.get("version", "v1"),
+                llm=_env_llm(),
+            )
+        except Exception as exc:  # noqa: BLE001 - DB/driver setup errors are client-fixable → 400
+            return JSONResponse({"error": "e2e_failed", "detail": str(exc)}, status_code=400)
+        status = 200 if result.get("result") in {"green", "awaiting_approval"} else 422
+        return JSONResponse(result, status_code=status)
+
     @app.post("/design/api/contract")
     async def design_api_contract(request: dict) -> JSONResponse:
         """Generate the OpenAPI 3.1 contract from a schema (Milestone 4) — the source of truth."""
@@ -540,12 +751,67 @@ def register_interactive_routes(app: FastAPI) -> None:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse(result)
 
+    @app.post("/design/code")
+    async def design_code(request: dict) -> JSONResponse:
+        """Generate code from a ``schema_json`` (unify spec phase 2 §2 — the code-gen bridge).
+
+        ``kind`` selects the artifact. ``sql`` stays in the deterministic Core (diff-from-empty →
+        SQL emitter); ``model``/``crud``/``schema`` reuse the proven legacy generators behind the
+        ``schema_json → DatabaseSchema`` bridge (:mod:`app.core.codegen_bridge`). No generation logic
+        is duplicated and ``schema_json`` remains the source of truth (no reverse translation).
+        """
+        payload = request.get("schema_json") or (request.get("handoff") or {}).get("schema_json")
+        if payload is None:
+            return JSONResponse({"error": "missing schema_json"}, status_code=400)
+        kind = request.get("kind", "sql")
+        try:
+            schema = core_sj.load(core_sj.migrate(payload), validate=False)
+        except Exception as exc:  # noqa: BLE001 - malformed input → 400, not 500
+            return JSONResponse({"error": "invalid_schema_json", "detail": str(exc)}, status_code=400)
+        try:
+            if kind == "sql":
+                driver = request.get("driver", "postgres")
+                empty = core_sj.load({"formatVersion": "1.0.0", "logical": {"tables": []}}, validate=False)
+                script = emit_sql(core_diff.diff(empty, schema).op_dicts(), schema, driver=driver)
+                content = ";\n\n".join(script.up_statements())
+                content = content + ";\n" if content else "-- (empty schema)\n"
+                return JSONResponse({"kind": kind, "language": "sql", "content": content})
+            legacy = core_codegen.to_legacy_schema(schema)
+            if kind == "model":
+                content = generate_model(legacy, request.get("framework", "laravel"), request.get("table"))
+            elif kind == "crud":
+                content = generate_crud(
+                    legacy, request.get("framework", "laravel"), request.get("table"), request.get("methods")
+                )
+            elif kind == "schema":
+                framework = request.get("framework", "prisma")
+                content = export_one(legacy, framework) if framework in EXPORTERS \
+                    else export_framework_schema(legacy, framework)
+            else:
+                return JSONResponse({"error": f"unsupported kind {kind!r}"}, status_code=400)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"kind": kind, "framework": request.get("framework"), "content": content})
+
+    @app.get("/design/code/frameworks")
+    async def design_code_frameworks() -> JSONResponse:
+        """Frameworks/targets the code-gen bridge offers (drives the Code panel's dropdowns)."""
+        fw = supported_frameworks()
+        return JSONResponse({
+            "sql": ["postgres"],
+            "model": fw["model"],
+            "crud": fw["crud"],
+            "crudMethods": fw["crud_methods"],
+            # `schema` = whole-schema exporters faithful to schema_json (mermaid intentionally dropped).
+            "schema": ["prisma", "markdown", "django", "sqlalchemy", "typeorm", "sequelize"],
+        })
+
     @app.get("/capabilities")
     async def capabilities() -> JSONResponse:
         """Capability manifest for the Designer expert module (spec §3)."""
         return JSONResponse({
             "module": "visual_database_designer",
-            "milestone": "m4-api-contract",
+            "milestone": "e2e-integration",
             "modes": ["greenfield", "brownfield"],
             "drivers": list(SUPPORTED_DRIVERS),
             "sessionStates": [s.value for s in SessionState],
@@ -558,9 +824,17 @@ def register_interactive_routes(app: FastAPI) -> None:
                            "/design/sessions/{id}/submit", "/design/sessions/{id}/approve",
                            "/design/sessions/{id}/reject", "/design/sessions/{id}/revise",
                            "/design/sessions/{id}/migration", "/design/sessions/{id}/handoff"],
-                "brownfield": ["/design/import", "/design/sessions (mode=brownfield)", "/design/drift"],
+                "brownfield": ["/design/import (live dsn)", "/design/import (sql file via shadow db)",
+                               "/design/sessions (mode=brownfield)", "/design/drift"],
                 "seeder": ["/design/seed"],
                 "api": ["/design/api/contract", "/design/api/server", "/design/api/client"],
+                "integration": ["/design/run-e2e"],
+                "codegen": ["/design/code", "/design/code/frameworks"],
+                # /designer is the single visual reference (the legacy /canvas SPA was removed). It is a
+                # thin shell over these engine endpoints — it decides nothing in the browser.
+                "designer": ["/designer", "/design/render", "/design/presentation", "/core/types",
+                             "/core/validate", "/core/diff", "/core/risk", "/design/code",
+                             "/design/import", "/design/drift"],
             },
             "driftCategories": ["synced", "migration_not_applied", "manual_prod_change",
                                 "design_ahead_of_code", "code_ahead_of_design", "migration_incomplete"],
@@ -572,16 +846,17 @@ def register_interactive_routes(app: FastAPI) -> None:
                 "driftSafety": "drift is report-only; every reconciliation is a human-approved suggestion",
                 "seedSafety": "the seeder produces data/SQL; applying it is an explicit step (no auto-apply)",
                 "apiContract": "OpenAPI 3.1 is the source of truth; server & client derive from it (no auto-deploy)",
+                "endToEnd": "run-e2e chains the subsystems unchanged; each step's output is the next's input",
             },
         })
 
-    @app.get("/canvas")
-    async def canvas_page():
-        index = _FRONTEND_DIR / "index.html"
-        if index.exists():
-            return FileResponse(index)
-        return PlainTextResponse("Canvas frontend is not bundled in this build.", status_code=404)
+    # The visual designer: the built React Flow + Tailwind SPA, served at /designer/. It is the sole
+    # UI reference (the legacy no-build /canvas SPA has been removed). It is only present when the
+    # frontend has been built (`cd frontend-canvas && npm run build`), so its absence never breaks the
+    # API service — every feature it offers is also reachable through the REST endpoints above.
+    @app.get("/designer")
+    async def designer_redirect():
+        return RedirectResponse(url="/designer/")
 
-    # Serve the canvas assets (canvas.js, styles.css, components/*) when present.
-    if _FRONTEND_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(_FRONTEND_DIR)), name="static")
+    if _CANVAS_DIST.exists():
+        app.mount("/designer", StaticFiles(directory=str(_CANVAS_DIST), html=True), name="designer")

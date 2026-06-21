@@ -32,6 +32,7 @@ from app.core.importer import (
     IntrospectedTable,
     apply_sql,
     build_schema_json,
+    import_sql_via_shadow,
     introspect_postgres,
 )
 from app.core.sql_emitter import emit_sql
@@ -246,6 +247,37 @@ def test_live_round_trip_emit_apply_import_is_equivalent():
         apply_sql(dsn, up)
         imported = build_schema_json(introspect_postgres(dsn))["schema_json"]
         assert _fingerprint(designed) == _fingerprint(imported)
+    finally:
+        _reset(dsn)
+
+
+@pytest.mark.live_postgres
+def test_live_file_import_via_shadow_db_preserves_uuid_fk():
+    """File import (§2): a raw SQL/DDL dump → shadow DB → introspect → schema_json. The whole point
+    of the project: a uuid foreign key survives the round-trip as ``uuid``, never an integer."""
+    dsn = _driver_or_skip()
+    _reset(dsn)
+    dump = """
+        CREATE TABLE users (id uuid PRIMARY KEY, email varchar(255) NOT NULL);
+        CREATE TABLE orders (
+            id uuid PRIMARY KEY,
+            user_id uuid NOT NULL REFERENCES users(id),
+            total numeric(12,2) NOT NULL
+        );
+    """
+    try:
+        result = import_sql_via_shadow(dump, dsn, name="shop")
+        schema = result["schema_json"]
+        assert {t["name"] for t in schema["logical"]["tables"]} == {"users", "orders"}
+        # The FK column's physical type is read straight from the database → uuid (not integer).
+        s = sj.load(schema, validate=False)
+        physical = core_drift._physical_map(s, DEFAULT_REGISTRY)
+        assert physical[("orders", "user_id")] == "uuid"
+        # A real relation was rebuilt from the FK constraint.
+        assert any(r.type in {"one_to_many", "one_to_one"} for r in s.logical.relations)
+        # Deterministic: importing the same dump again is byte-identical.
+        again = import_sql_via_shadow(dump, dsn, name="shop")
+        assert json.dumps(result["schema_json"], sort_keys=True) == json.dumps(again["schema_json"], sort_keys=True)
     finally:
         _reset(dsn)
 

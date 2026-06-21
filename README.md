@@ -37,8 +37,10 @@ Module Protocol v1). It runs as its own FastAPI app on **port 9107** and can be 
 
 - **As a platform pipeline stage** — the AI Orchestrator calls `POST /run` with a `feature_request`
   and gets back a `database_schema` artifact (the Module Protocol contract).
-- **As an interactive tool** — a built-in React Flow **canvas** (served at `/canvas`) calls the
-  module's own REST endpoints (`/design`, `/validate`, `/export`, …) to design schemas visually.
+- **As an interactive tool** — a built-in React Flow **designer** (served at `/designer`) calls the
+  engine endpoints (`/design/render`, `/core/validate`, `/core/diff`, `/design/code`, …) to design,
+  validate, diff/approve and generate code from schemas visually. (The legacy no-build `/canvas` SPA
+  has been removed; `/designer` is now the sole visual reference.)
 - **As a production design engine** — the `/core/*` and `/design/*` endpoints expose a deterministic,
   approval-gated pipeline that takes a schema from *draft → approved → executable migration → handoff*,
   plus brownfield **import** from a live Postgres database and three-way **drift** detection.
@@ -88,12 +90,24 @@ analysis — never auto-applying anything.
 - **CRUD generators** (one table → controller): Laravel, Express (TypeScript), Django REST.
 - **Schema versioning:** diff two versions → ordered SQL migration.
 
-**Interactive canvas** (`/canvas`)
-- Drag & drop tables; edit/add/delete columns (type, length, constraints, default, enum values).
-- Edit relationships (type + `on_delete`/`on_update`) via edge editor.
-- Reusable named enums, composite keys, explicit/composite indexes, table & column comments.
-- Table groups (colour-coded), search/filter, undo/redo (50-deep), zoom controls, field presets.
-- Tabs: **Design** / **ERD** (Mermaid) / **Code** (export + generate) / **Versions** (compare).
+**Visual designer** (`/designer`) — engine-connected, the sole UI reference
+- Edit tables, columns and relationships; every edit round-trips through `/design/render` +
+  `/core/validate` (the front-end decides nothing — it shows what the engine returns).
+- Generate a schema from a description (greenfield session + `suggest` + `apply`).
+- **Import / connect an existing database** (`/design/import`): a live Postgres connection **or** a
+  SQL/DDL file (applied to a server-side shadow DB, then introspected — no SQL parsed in the browser).
+  Ambiguous reverse-inferences are surfaced for the human to confirm (AD-5); the imported map becomes
+  a brownfield baseline you can edit, then diff/approve.
+- **Compare with database** (`/design/drift`): three-way drift (design ↔ migrations ↔ live), shown as
+  a readable report **and** reflected on the canvas (design-only = green, type drift = yellow).
+- Duplicate tables (fresh Stable IDs), reusable named enums, explicit/composite indexes, table
+  description/domain, and a timestamps/soft-delete toggle that expands to **real** datetime columns.
+- Diff vs the approved base + the engine approval gate (`/core/diff` + `/core/risk` + sessions).
+- **Code** panel: SQL DDL & OpenAPI (engine-native) plus ORM models, CRUD controllers and framework
+  schema exports through the server-side code-gen **bridge** (`/design/code`).
+- Search/filter, undo/redo (50-deep), zoom in/out/fit/100%, light & dark themes.
+
+> The Mermaid ERD tab was intentionally **not** migrated — the canvas itself is a live ERD.
 
 **Production Core (`app/core/`) — deterministic schema engine**
 - **Stable IDs** (AD-1), **two-layer Type System** (semantic ↔ physical, AD-2), **layered/versioned
@@ -136,6 +150,19 @@ analysis — never auto-applying anything.
   (FastAPI/Python), one driver (Postgres); CRUD + light nested reads. No auto-deploy.
 - **Client** (`/design/api/client`, secondary): a `fetch`-based TypeScript client + Postman collection,
   derived from the OpenAPI document. The LLM, if any, only enriches descriptions/examples.
+
+**End-to-end integration (`/design/run-e2e`)**
+- A thin orchestrator that runs the whole chain back-to-back on one real Postgres and reports each step:
+  greenfield `suggest → [approval] → migration → seed → API → real GET/POST`, or brownfield
+  `import → drift → seed → API`. It adds **no new logic** — every step's output is the next step's input,
+  untouched (the approved `handoff["schema_json"]` flows through migration, seed and the API server). The
+  only pause is the human approval gate (`autoApprove` is for automated runs); without approval nothing
+  downstream runs. Each step reports `ok`; a failure stops the chain and names the exact step (the point
+  is to surface any contract mismatch, not to paper over it). It actually applies the migration, inserts
+  the seed and drives the generated M4 server over HTTP — a runnable demo of the entire product.
+  *(Building this surfaced and fixed one real leak: the AI-suggest step produced relations without a
+  `foreignKeyFieldId`, so the emitter guessed a `<table>_id` column and the FK type wasn't resolved;
+  `suggest._normalize` now links every relation to its foreign-key field.)*
 
 ---
 
@@ -224,11 +251,12 @@ visual-database-designer/
 │       ├── drift.py                # M2 three-way drift: reconcile + three_way_drift + SARIF
 │       └── seeder.py               # M3 scenario seeder: deterministic, FK/enum/state-consistent data
 │
-├── frontend/                   # No-build React Flow canvas (served at /canvas)
-│   ├── index.html              # import-map loader (React/ReactDOM/ReactFlow/Mermaid from CDN)
-│   ├── canvas.js               # the canvas app (schema↔graph, editors, tabs)
-│   ├── components/TableNode.js # a table node (columns, PK/FK markers, edit handles)
-│   └── styles.css              # canvas theme
+├── frontend-canvas/            # The visual designer SPA — Vite+React+TS+Tailwind+React Flow (served at /designer)
+│   ├── src/lib/                # types, schema (editable doc + structural mutations), api, graph, layout, diffStyle
+│   ├── src/store/              # centralized zustand state: editable doc, engine-resolved view, diff, approve gate
+│   ├── src/components/canvas/  # TableNode, Canvas, RelationDialog, ApproveDialog, GenerateDialog, EnumDialog
+│   ├── src/components/panels/  # Toolbar (generate/add/enums/undo/zoom/code/changes/approve), DetailsPanel, CodePanel, DiffPanel
+│   └── src/**/*.test.ts(x)     # Vitest + Testing Library: schema mutations, engine-validated edits, FK guard, diff/approve gate
 │
 ├── docs/                       # Architecture decisions + per-engine specs + milestone specs
 ├── tests/
@@ -295,7 +323,8 @@ visual-database-designer/
   exceptions `SessionNotFoundError` (404), `InvalidTransitionError` (409), `GateBlockedError` (409).
 - **`suggest`** — `suggest_schema(prd, llm=None)` (greenfield AI suggestion + deterministic normalize).
 - **`importer`** — `introspect_postgres(dsn)` (impure), `build_schema_json()` (pure/deterministic),
-  `apply_sql()` (shadow-DB applier), `split_sql()`, `enrich_ambiguous()`.
+  `apply_sql()` (shadow-DB applier), `split_sql()`, `import_sql_via_shadow(sql, shadowDsn)` (file
+  import: apply a DDL dump to a shadow DB then introspect it), `enrich_ambiguous()`.
 - **`drift`** — `reconcile()`, `three_way_drift()` → `DriftReport` (`DriftEntry`, `to_sarif()`,
   `exit_code`).
 - **`seeder`** — `seed_data(schema_json, seed, scenario, output)` → `{rows, sql|data, warnings}`;
@@ -303,8 +332,8 @@ visual-database-designer/
 
 ### "Controllers" & "views"
 There are no MVC controllers — the HTTP layer is FastAPI route functions defined in
-`register_interactive_routes()` (`routes.py`). The only "view" is the static **canvas** SPA in
-`frontend/` (served at `/canvas`, assets under `/static`).
+`register_interactive_routes()` (`routes.py`). The only "view" is the built **designer** SPA in
+`frontend-canvas/` (served at `/designer`).
 
 ---
 
@@ -378,7 +407,17 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 | GET  | `/frameworks`     | supported `{export, model, crud, crud_methods}` lists |
 | GET  | `/field-presets`  | common-column catalog for the canvas |
 | POST | `/compare`        | `{old, new}` → `{diff, migration}` — version diff + SQL migration |
-| GET  | `/canvas`         | the drag & drop designer page |
+
+> These legacy REST endpoints operate on the simpler `DatabaseSchema` model and remain the module's
+> stable framework-agnostic API. The visual designer no longer uses them — it drives the `schema_json`
+> engine endpoints below (and `/design/code` for generation).
+
+### Designer code-generation (bridge) endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/code` | `{schema_json, kind, framework?, table?, methods?}` → `{content}`. `kind`: `sql` (engine-native) \| `model` \| `crud` \| `schema`. ORM/CRUD/exports reuse the proven generators via the `schema_json → DatabaseSchema` bridge — FK physical types (uuid stays uuid) and semantic types are preserved in translation. |
+| GET  | `/design/code/frameworks` | `{sql, model, crud, crudMethods, schema}` lists for the Code panel's dropdowns |
 
 ### Core (deterministic `schema_json`) endpoints
 
@@ -411,7 +450,7 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/design/import`                  | `{dsn, name?, enrich?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}` |
+| POST | `/design/import`                  | live: `{dsn, name?, enrich?}` · file: `{sql\|ddl, shadowDsn? (else `VDB_SHADOW_DSN`), name?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}` |
 | POST | `/design/sessions` (brownfield)   | `{mode:"brownfield", importDsn \| schema_json}` → session with `baselineSource:"import"` |
 | POST | `/design/drift`                   | `{designed, live\|liveDsn, migrations\|migrationsDsn\|(migrationsDir+shadowDsn), sarif?}` → `{reconcile, drift, summary, exitCode, sarif?}` |
 | GET  | `/capabilities`                   | capability manifest (modes, drivers, drift categories, scenarios, guarantees) |
@@ -429,6 +468,25 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 | POST | `/design/api/contract` | `{schema_json \| handoff, version?}` → `{openapi, stats:{resources,paths,operations}}` — deterministic OpenAPI 3.1, the source of truth |
 | POST | `/design/api/server` | `{schema_json \| handoff, target:"fastapi", version?}` → `{files:{main.py, requirements.txt, README.md}, target}` — self-contained reference server (no auto-deploy) |
 | POST | `/design/api/client` | `{openapi \| schema_json, target:"typescript"}` → `{files:{client.ts}, postman}` — secondary, derived from the OpenAPI document |
+
+### End-to-end integration
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/run-e2e` | `{mode:"greenfield"\|"brownfield", prd?, dsn, autoApprove?, seed?, scenario?, version?}` → `{steps:[{step, ok, ...}], result:"green"\|"awaiting_approval"\|"red", sessionId, schemaVersion?}` — runs the whole chain on a real Postgres; needs a real `dsn` |
+
+### Canvas — visual designer (Canvas Milestones 1–3: view + edit + diff/approve)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/design/render` | `{schema_json \| sessionId \| handoff}` → `{tables, relations, enums, presentation, hasLayout}` — a render projection of a `schema_json`. Reuses the Type System's existing resolution so each field carries its resolved `physicalType` (an FK column inherits the referenced PK's type — a uuid FK is `uuid`, never an int) and a `pii` flag; adds **no** new engine logic. The editing canvas re-renders through this after every change. |
+| POST | `/core/validate` | the canvas validates each edit here — findings (with `entity_id`) are shown inline next to the field/table (Canvas M2 §0/§6). |
+| GET  | `/core/types` | semantic-type catalogue for the editor's type dropdown (Canvas M2 §1/§3). |
+| POST | `/design/presentation` | `{nodes, schema_json? \| sessionId?}` → `{schema_json, persisted}` — saves canvas layout into the `presentation` layer only. Layout is **not** schema-affecting (the diff engine ignores it), so a table move never counts as a schema change and never changes a session's gate state (Canvas M2 §4). The one thin endpoint the spec permits for presentation (§8). |
+| POST | `/core/diff` | `{from, to}` → typed operation list + `colored` lines. The canvas shows the change list and tints the canvas with the standard colours; moving a table yields no operations (Canvas M3 §1). |
+| POST | `/core/risk` | `{from, to}` → migration risk report. Shown before approve; a `critical` op (e.g. `drop_table`) must be acknowledged (Canvas M3 §3). |
+| (gate) | `/design/sessions/*` | Canvas M3 **approve** drives the *existing* approval gate — a brownfield session (baseline = the canvas base) then apply-suggestion → validate → submit → approve `{acknowledgeCritical}`. No new engine logic; the gate decides (spec §0/§6). |
+| GET  | `/designer` | the built React Flow + Tailwind **Canvas** SPA (present only when `frontend-canvas/` has been built). |
 
 ---
 
@@ -451,6 +509,30 @@ result tabs live there. This module simply exposes machine + canvas endpoints.
   `Ctrl+Y`); zoom controls. Tabs: **Design**, **ERD** (live Mermaid render), **Code** (export + generate),
   **Versions** (client-side snapshots compared into a migration script).
 - Theme: a single `styles.css`; no theming system or dark mode toggle.
+
+**Canvas (`frontend-canvas/`, served at `/designer/`):** a separate, **build-based**
+(Vite + React + TypeScript + Tailwind + React Flow) single-page app — the tool's own UI, now the
+**complete** view → edit → diff → approve cycle (Canvas Milestones 1–3). It is an **editing tool, not an engine**:
+every change only mutates the local `schema_json` *structurally*, then goes back through the engine —
+`POST /design/render` re-resolves types and `POST /core/validate` returns findings shown inline — so
+no database logic lives in the front-end (`edit → render + validate → render`, a one-way,
+engine-authoritative path). It renders each table as a node (PK/FK icons, a lock on sensitive fields,
+semantic zoom, an error mark when the engine flags it), each relation as a directional edge with a
+cardinality marker, and auto-lays-out (dagre) schemas without saved `presentation` positions.
+Editing: rename/add/delete tables and fields and change a field's **semantic** type from the panel;
+draw a relation by dragging between tables (a dialog makes the **FK field mandatory**, so an
+incomplete relation is impossible and a uuid PK yields a uuid FK); double-click to rename inline;
+reposition tables (saved to `presentation` via `/design/presentation`, **not** counted as a schema
+change). **Diff & approve (M3):** a **Changes** panel renders the engine's `/core/diff` operation
+list in the standard colours (green=add, red=remove, yellow=change, blue=rename) and tints the
+changed tables/fields/relations on the canvas; **Approve** is enabled only once validation is green,
+shows the `/core/risk` report, requires explicit acknowledgement for a `critical` op (e.g. dropping a
+table — the gate's `acknowledgeCritical`), and on success locks the version and makes it the new base.
+Approve drives the *existing* engine gate (no diff/approve/risk logic in the front-end). The toolbar
+carries add-table, undo/redo, an "unsaved changes" indicator, a validation summary, **Changes** and
+**Approve**. State is centralized (zustand) with light/dark theming (CSS variables, respects the OS
+preference, switches with no reload). Tested with **Vitest + Testing Library**
+(`cd frontend-canvas && npm install && npm test`); built with `npm run build` into `dist/`.
 
 ---
 
@@ -575,7 +657,7 @@ POST /design/sessions ─▶ suggest (LLM, optional) ─▶ apply-suggestion ─
 ```bash
 packages/module-sdk-python/.venv/Scripts/python.exe -m uvicorn app.main:app \
   --app-dir services/modules/visual-database-designer --port 9107
-# open http://localhost:9107/canvas
+# open http://localhost:9107/designer
 ```
 
 **Design a schema (pipeline contract):**

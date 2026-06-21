@@ -75,6 +75,9 @@ def _normalize(candidate: dict[str, Any]) -> dict[str, Any]:
             field.setdefault("nullable", not field.get("isPrimaryKey", False))
 
     valid_ids = set(name_to_id.values())
+    id_to_table = {t["id"]: t for t in tables}
+    id_to_name = {tid: name for name, tid in name_to_id.items()}
+    claimed_fk: set[str] = set()
     norm_relations: list[dict[str, Any]] = []
     for rel in logical.get("relations", []):
         frm = rel.get("fromTableId") or rel.get("fromTable")
@@ -86,17 +89,44 @@ def _normalize(candidate: dict[str, Any]) -> dict[str, Any]:
         rid = rel.get("id")
         if not (is_valid_id(rid) and id_prefix(rid) == "rel"):
             rid = _stable_id("rel", frm, to)
-        norm_relations.append({
+        entry: dict[str, Any] = {
             "id": rid,
             "name": rel.get("name", "belongsTo"),
             "type": rel.get("type", "one_to_many"),
             "fromTableId": frm,
             "toTableId": to,
             **({"onDelete": rel["onDelete"]} if rel.get("onDelete") else {}),
-        })
+        }
+        # Link the relation to its foreign-key field. A producer (heuristic or LLM) often omits this,
+        # but downstream the emitter then can't find the FK column (it guesses `<table>_id`) and the
+        # Type System can't resolve the FK's physical type — so we resolve it here, deterministically.
+        fk_field_id = rel.get("foreignKeyFieldId") or rel.get("foreign_key_field_id")
+        if not (fk_field_id and any(f.get("id") == fk_field_id for f in id_to_table[frm]["fields"])):
+            fk_field_id = _resolve_fk_field(id_to_table[frm], id_to_name.get(to, ""), claimed_fk)
+        if fk_field_id:
+            entry["foreignKeyFieldId"] = fk_field_id
+            claimed_fk.add(fk_field_id)
+        norm_relations.append(entry)
     if norm_relations or "relations" in logical:
         logical["relations"] = norm_relations
     return data
+
+
+def _resolve_fk_field(from_table: dict[str, Any], to_name: str, claimed: set[str]) -> str | None:
+    """Find the foreign-key field in ``from_table`` that backs a relation to ``to_name``.
+
+    Prefer a conventionally-named column (``<singular(to)>_id`` / ``<to>_id``); otherwise fall back to
+    the first still-unclaimed foreign-key field. Deterministic (field order is preserved)."""
+    fks = [f for f in from_table.get("fields", [])
+           if f.get("semanticType") == "foreign_key" and f.get("id") not in claimed]
+    if not fks:
+        return None
+    singular = to_name[:-1] if to_name.endswith("s") else to_name
+    for candidate in (f"{singular}_id", f"{to_name}_id"):
+        for f in fks:
+            if f.get("name") == candidate:
+                return f.get("id")
+    return fks[0].get("id")
 
 
 # --------------------------------------------------------------------------------------------------

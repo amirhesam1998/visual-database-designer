@@ -255,6 +255,23 @@ class SessionStore:
         session.updated_at = _now()
         return session
 
+    def update_presentation(self, session_id: str, nodes: list[dict[str, Any]]) -> DesignSession:
+        """Persist canvas layout into the ``presentation`` layer ONLY (Canvas M2 §4).
+
+        Moving a table is *not* a schema change: the diff/risk engines ignore ``presentation``
+        (spec-schema-json-format §1), so this deliberately does NOT touch ``state`` or
+        ``last_validation`` and does NOT drop an approved session back to draft. It is the one
+        edit that bypasses the re-validate cycle, by design.
+        """
+        session = self.get(session_id)
+        doc = dict(session.schema_doc)
+        presentation = dict(doc.get("presentation") or {})
+        presentation["nodes"] = nodes
+        doc["presentation"] = presentation
+        session.schema_doc = doc
+        session.updated_at = _now()
+        return session
+
     # -- transitions -------------------------------------------------------------------------------
     def validate(self, session_id: str) -> tuple[DesignSession, ValidationOutcome]:
         session = self.get(session_id)

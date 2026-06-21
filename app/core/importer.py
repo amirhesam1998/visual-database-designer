@@ -315,6 +315,25 @@ def apply_sql(dsn: str, statements: list[str]) -> None:
         conn.close()
 
 
+def import_sql_via_shadow(
+    sql: str, shadow_dsn: str, *, name: str = "imported", schema: str = "public", reset: bool = True
+) -> dict[str, Any]:
+    """Import a raw SQL/DDL dump by applying it to a **shadow database**, then introspecting it.
+
+    This is the file-import path (database-connection milestone §2). It reuses the very same M2 chain
+    a live import does — ``split_sql`` → ``apply_sql`` → :func:`introspect_postgres` →
+    :func:`build_schema_json` — instead of parsing SQL in the front-end, so a uuid FK still comes back
+    as ``uuid`` and the result is the identical layered, Stable-ID ``schema_json``. The shadow schema
+    is reset first (``DROP SCHEMA … CASCADE``) so the import reflects only this dump, and applying it
+    inside a temporary database keeps the user's real database untouched (it is import + compare only).
+    """
+    statements = split_sql(sql)
+    if reset:
+        statements = [f'DROP SCHEMA IF EXISTS "{schema}" CASCADE', f'CREATE SCHEMA "{schema}"', *statements]
+    apply_sql(shadow_dsn, statements)
+    return build_schema_json(introspect_postgres(shadow_dsn, schema=schema), name=name)
+
+
 # ==================================================================================================
 # Stable-ID minting (deterministic — same name → same id, so two imports are byte-identical).
 # ==================================================================================================

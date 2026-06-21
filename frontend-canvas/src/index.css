@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light/dark theme via CSS variables (spec §1, §4). Switching the `.dark` class on <html> retheme
+   the whole canvas without a reload; the transition below makes the switch gentle. */
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 16% 93%;
+    --muted-foreground: 215 16% 47%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 210 40% 98%;
+    --accent: 210 16% 90%;
+    --accent-foreground: 222 47% 11%;
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 221 83% 53%;
+    --pk: 38 92% 50%;
+    --fk: 199 89% 48%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --radius: 0.6rem;
+    --canvas-dots: 214 18% 82%;
+  }
+
+  .dark {
+    --background: 222 30% 9%;
+    --foreground: 210 20% 96%;
+    --card: 222 25% 13%;
+    --card-foreground: 210 20% 96%;
+    --muted: 217 25% 18%;
+    --muted-foreground: 215 16% 65%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+    --accent: 217 25% 20%;
+    --accent-foreground: 210 20% 96%;
+    --border: 217 22% 22%;
+    --input: 217 22% 22%;
+    --ring: 217 91% 60%;
+    --pk: 38 92% 55%;
+    --fk: 199 89% 55%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 40% 98%;
+    --canvas-dots: 217 18% 28%;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Gentle theme transition (spec §4 — "soft transition on theme switch"). */
+  html.theme-anim,
+  html.theme-anim * {
+    transition:
+      background-color 0.25s ease,
+      border-color 0.25s ease,
+      color 0.25s ease,
+      fill 0.25s ease;
+  }
+}
+
+/* React Flow theme bridge — drive the library's CSS vars from ours so light/dark stays consistent. */
+.react-flow {
+  --rf-background-color: hsl(var(--background));
+}
+.react-flow__edge-path {
+  stroke: hsl(var(--muted-foreground));
+  transition: stroke 0.2s ease, stroke-width 0.2s ease;
+}
+.react-flow__edge.is-dimmed {
+  opacity: 0.15;
+}
+.react-flow__edge.is-highlighted .react-flow__edge-path {
+  stroke: hsl(var(--primary));
+  stroke-width: 2.5;
+}
+.react-flow__node.is-dimmed {
+  opacity: 0.25;
+}
+.react-flow__handle {
+  opacity: 0;
+}
+/* In edit mode the handles become connectable (React Flow adds `connectionindicator`); show them as
+   small grab targets so a relation can be drawn by dragging one onto another table (spec §2). */
+.react-flow__handle.connectionindicator {
+  opacity: 1;
+  width: 9px;
+  height: 9px;
+  background: hsl(var(--primary));
+  border: 2px solid hsl(var(--card));
+}
+.react-flow__attribution {
+  display: none;
+}
