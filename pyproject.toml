@@ -5,6 +5,7 @@ pythonpath = ["."]
 markers = [
     "conformance: milestone acceptance gate (the proof-of-contract kit, distinct from unit tests)",
     "live_postgres: requires a real PostgreSQL (set VDB_TEST_POSTGRES_DSN); skipped otherwise",
+    "live_mysql: requires a real MySQL/MariaDB (set VDB_TEST_MYSQL_DSN); skipped otherwise",
 ]
 
 [tool.ruff]

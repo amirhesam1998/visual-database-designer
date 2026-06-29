@@ -89,8 +89,8 @@ def test_rollback_is_reverse_ordered():
 
 def test_unsupported_driver_raises():
     ops, target = _greenfield_ops(canonical_schema())
-    with pytest.raises(ValueError, match="postgres"):
-        emit_sql(ops, target, driver="mysql")
+    with pytest.raises(ValueError, match="sqlite"):
+        emit_sql(ops, target, driver="sqlite")  # postgres + mysql are supported; sqlite is not (yet)
 
 
 def test_emitter_is_deterministic():

@@ -307,6 +307,7 @@ def build_default_registry() -> TypeRegistry:
             openapi={"type": "string", "pattern": "^[0-9]{10}$"},
         ),
         _t("uuid", "string", {"type": "uuid"}, rules=["uuid"],
+           by_driver={"mysql": {"type": "char", "length": 36}},  # MySQL has no native uuid → CHAR(36) (the FK lesson)
            openapi={"type": "string", "format": "uuid"}),
         _t("color", "string", {"type": "varchar", "length": 9}, rules=["regex:^#"], component="color-picker"),
         _t("markdown", "string", {"type": "text"}, component="markdown-editor"),
@@ -332,6 +333,7 @@ def build_default_registry() -> TypeRegistry:
         _t("date", "temporal", {"type": "date"}, rules=["date"], component="date-picker", fake="date",
            openapi={"type": "string", "format": "date"}),
         _t("datetime", "temporal", {"type": "timestamp"}, rules=["date"], component="datetime-picker", fake="datetime",
+           by_driver={"mysql": {"type": "datetime"}},  # MySQL: DATETIME has the broad range a created/updated needs
            openapi={"type": "string", "format": "date-time"}),
         _t("timestamp", "temporal", {"type": "timestamp"}, rules=["date"], component="datetime-picker", fake="datetime",
            openapi={"type": "string", "format": "date-time"}),
@@ -340,6 +342,7 @@ def build_default_registry() -> TypeRegistry:
            openapi={"type": "integer"}),
         # --- logical / choice ---
         _t("boolean", "boolean", {"type": "boolean"}, rules=["boolean"], component="switch", fake="boolean",
+           by_driver={"mysql": {"type": "tinyint", "length": 1}},  # MySQL boolean → TINYINT(1)
            openapi={"type": "boolean"}),
         _t("enum", "choice", {"type": "varchar", "length": 64}, rules=["in_enum"], component="select", fake="enum"),
         _t("status", "choice", {"type": "varchar", "length": 64}, rules=["in_enum"], component="select", fake="enum"),

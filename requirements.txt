@@ -5,3 +5,8 @@ jsonschema==4.26.0
 # Postgres driver for the brownfield importer / three-way drift (Milestone 2): introspection,
 # shadow-DB migration apply, and live execution. Binary wheel avoids needing libpq at build time.
 psycopg[binary]==3.3.4
+# MySQL/MariaDB driver (multi-driver milestone): introspection + shadow-DB apply for the MySQL
+# driver. Pure-Python, no system libs needed; imported lazily so it's optional at runtime.
+PyMySQL==1.1.1
+# Deterministic YAML export in app/core/schema_export.py (Code panel Artifact menu).
+PyYAML==6.0.3
