@@ -17,8 +17,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root: these are Python build outputs at the module root, NOT the frontend's
+# `frontend-canvas/src/lib/` (which is source and must be tracked — an unanchored `lib/` silently
+# ignored the whole frontend lib directory).
+/lib/
+/lib64/
 parts/
 sdist/
 var/
