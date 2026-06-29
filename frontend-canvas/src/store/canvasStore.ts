@@ -135,7 +135,7 @@ interface CanvasState {
 
   /** Compare the working design against a live database via the engine (`/design/drift`, spec §3).
    *  Report-only: returns whether the call succeeded; every category is the engine's decision. */
-  compareWithDatabase: (liveDsn: string) => Promise<{ ok: boolean; error?: string }>;
+  compareWithDatabase: (liveDsn: string, driver?: string) => Promise<{ ok: boolean; error?: string }>;
   clearDrift: () => void;
 
   /** Drive the engine approval gate (spec §2/§3). Returns the gate's verdict — never a UI decision. */
@@ -326,12 +326,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   // Compare the working design against a real database (database-connection milestone §3). Pure
   // surfacing of `/design/drift`: the engine does the three-way categorisation; the canvas only sends
   // the designed schema + a live DSN and stores the report. Never writes to the database (AD-5).
-  compareWithDatabase: async (liveDsn) => {
+  compareWithDatabase: async (liveDsn, driver) => {
     const { doc } = get();
     if (!doc) return { ok: false, error: "nothing to compare" };
     set({ driftBusy: true });
     try {
-      const report = await driftAgainstDatabase(doc, liveDsn);
+      const report = await driftAgainstDatabase(doc, liveDsn, driver);
       set({ drift: report });
       return { ok: true };
     } catch (e) {

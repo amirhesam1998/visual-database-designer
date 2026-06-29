@@ -115,10 +115,15 @@ def _render_phys(p: dict[str, Any]) -> str:
     return base
 
 
-def _physical_map(schema: SchemaJson, reg: TypeRegistry) -> dict[tuple[str, str], str]:
+def _physical_map(schema: SchemaJson, reg: TypeRegistry, driver: str = "postgres") -> dict[tuple[str, str], str]:
     """``(table_name, column_name) → resolved physical type string``, FK columns resolved to their
-    referenced PK type (shared Type-System step) so intent and reality compare on equal footing."""
-    fk_override = resolve_fk_physical(schema, "postgres", reg)
+    referenced PK type (shared Type-System step) so intent and reality compare on equal footing.
+
+    Resolution is **driver-aware** (multi-driver milestone §2, the FK lesson): on MySQL a uuid PK is
+    ``CHAR(36)`` and its FK inherits exactly that, so a designed ``uuid``/``foreign_key`` column does
+    not show as spurious type drift against a live MySQL ``CHAR(36)`` column. All three legs are
+    resolved with the same driver, so the comparison stays on equal footing."""
+    fk_override = resolve_fk_physical(schema, driver, reg)
     out: dict[tuple[str, str], str] = {}
     for table in schema.logical.tables:
         for field in table.fields:
@@ -126,7 +131,7 @@ def _physical_map(schema: SchemaJson, reg: TypeRegistry) -> dict[tuple[str, str]
                 out[(table.name, field.name)] = _render_phys(fk_override[field.id])
                 continue
             try:
-                out[(table.name, field.name)] = _render_phys(reg.resolve(field, "postgres").physical)
+                out[(table.name, field.name)] = _render_phys(reg.resolve(field, driver).physical)
             except (KeyError, UnsupportedPhysicalTypeError):
                 out[(table.name, field.name)] = field.semantic_type
     return out
@@ -208,14 +213,14 @@ def _jaccard(x: set[str], y: set[str]) -> float:
 # --------------------------------------------------------------------------------------------------
 def three_way_drift(
     designed: SchemaJson, migrations: SchemaJson | None, live: SchemaJson | None,
-    *, registry: TypeRegistry | None = None,
+    *, registry: TypeRegistry | None = None, driver: str = "postgres",
 ) -> DriftReport:
     reg = registry or DEFAULT_REGISTRY
     rec = reconcile(designed, migrations, live)
     ta, tb, tc = _tables(designed), _tables(migrations), _tables(live)
-    pa, pb, pc = (_physical_map(designed, reg),
-                  _physical_map(migrations, reg) if migrations else {},
-                  _physical_map(live, reg) if live else {})
+    pa, pb, pc = (_physical_map(designed, reg, driver),
+                  _physical_map(migrations, reg, driver) if migrations else {},
+                  _physical_map(live, reg, driver) if live else {})
 
     entries: list[DriftEntry] = []
     for name in sorted(set(ta) | set(tb) | set(tc)):

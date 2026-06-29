@@ -62,6 +62,24 @@ def rewrite_host_for_container(dsn: str, *, force: bool | None = None) -> tuple[
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)), True
 
 
+def driver_for_dsn(dsn: str | None) -> str | None:
+    """Infer the Core driver name from a DSN scheme (``mysql``/``mariadb`` → ``mysql``,
+    ``postgres``/``postgresql`` → ``postgres``). Returns ``None`` for an unknown/blank scheme so the
+    caller can fall back to its default — this is how "the driver is determined from the connection"
+    (multi-driver milestone §3) without the UI having to state it explicitly."""
+    if not dsn:
+        return None
+    try:
+        scheme = (urlsplit(dsn).scheme or "").lower()
+    except ValueError:
+        return None
+    if scheme.startswith(("mysql", "mariadb")):
+        return "mysql"
+    if scheme.startswith("postgres"):
+        return "postgres"
+    return None
+
+
 def is_local_host(dsn: str) -> bool:
     """Whether the DSN targets a loopback host (used to tailor connection-error hints)."""
     try:

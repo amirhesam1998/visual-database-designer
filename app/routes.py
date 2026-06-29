@@ -639,14 +639,25 @@ def register_interactive_routes(app: FastAPI) -> None:
         designed_raw = request.get("designed")
         if designed_raw is None:
             return JSONResponse({"error": "missing designed schema_json"}, status_code=400)
+        # The driver is taken from the request, else inferred from whichever connection is supplied
+        # ("determined from the connection", multi-driver §3) so drift works on MySQL or Postgres with
+        # no new logic — only the introspect/apply legs become driver-aware (the reconcile/categorise
+        # core is driver-agnostic). All legs + type resolution use this one driver (the FK lesson §2).
+        driver = (
+            request.get("driver")
+            or core_dsn.driver_for_dsn(
+                request.get("liveDsn") or request.get("migrationsDsn") or request.get("shadowDsn"))
+            or "postgres"
+        )
         try:
             designed = core_sj.load(designed_raw, validate=False)
-            live = _resolve_leg(request, "live", "liveDsn")
-            migrations = _resolve_migrations_leg(request)
+            live = _resolve_leg(request, "live", "liveDsn", driver)
+            migrations = _resolve_migrations_leg(request, driver)
         except Exception as exc:  # noqa: BLE001 - DB/driver/parse errors → 400
             return JSONResponse({"error": "drift_failed", "detail": str(exc)}, status_code=400)
-        report = core_drift.three_way_drift(designed, migrations, live)
+        report = core_drift.three_way_drift(designed, migrations, live, driver=driver)
         body: dict = {
+            "driver": driver,
             "reconcile": report.reconcile.model_dump(),
             "drift": [d.model_dump() for d in report.drift],
             "summary": report.summary,
@@ -656,19 +667,21 @@ def register_interactive_routes(app: FastAPI) -> None:
             body["sarif"] = report.to_sarif()
         return JSONResponse(body)
 
-    def _resolve_leg(request: dict, inline_key: str, dsn_key: str) -> SchemaJson | None:
+    def _resolve_leg(request: dict, inline_key: str, dsn_key: str, driver: str = "postgres") -> SchemaJson | None:
         if request.get(inline_key) is not None:
             return core_sj.load(request[inline_key], validate=False)
         if request.get(dsn_key):
-            return _introspect_schema(request[dsn_key], inline_key)
+            return _introspect_schema(request[dsn_key], inline_key, driver)
         return None
 
-    def _resolve_migrations_leg(request: dict) -> SchemaJson | None:
+    def _resolve_migrations_leg(request: dict, driver: str = "postgres") -> SchemaJson | None:
         if request.get("migrations") is not None:
             return core_sj.load(request["migrations"], validate=False)
         if request.get("migrationsDsn"):
-            return _introspect_schema(request["migrationsDsn"], "migrations")
-        # migrationsDir + shadowDsn: apply the raw-SQL files to a shadow DB, then introspect it.
+            return _introspect_schema(request["migrationsDsn"], "migrations", driver)
+        # migrationsDir + shadowDsn: apply the raw-SQL files to a shadow DB, then introspect it. The
+        # shadow DB is the caller's throwaway database (never the real one); apply is driver-aware so a
+        # MySQL migrations leg goes through the MySQL driver, not a separate code path (multi-driver §2).
         migrations_dir = request.get("migrationsDir")
         shadow_dsn = request.get("shadowDsn")
         if migrations_dir and shadow_dsn:
@@ -676,8 +689,8 @@ def register_interactive_routes(app: FastAPI) -> None:
             statements: list[str] = []
             for f in files:
                 statements += core_importer.split_sql(f.read_text(encoding="utf-8"))
-            core_importer.apply_sql(shadow_dsn, statements)
-            return _introspect_schema(shadow_dsn, "migrations")
+            core_importer.apply_sql(shadow_dsn, statements, driver=driver)
+            return _introspect_schema(shadow_dsn, "migrations", driver)
         return None
 
     @app.post("/design/seed")

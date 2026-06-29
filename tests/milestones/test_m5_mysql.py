@@ -22,6 +22,7 @@ import pytest
 
 from app.core import schema_json as sj
 from app.core.diff import diff
+from app.core.drift import three_way_drift
 from app.core.drivers import get_driver
 from app.core.importer import build_schema_json, import_sql_via_shadow
 from app.core.sql_emitter import emit_sql
@@ -204,3 +205,59 @@ COMMIT;
     assert any(f.name == "id" and f.is_primary_key for f in users.fields)  # the ALTER PK applied
     assert any(f.name == "id" and f.auto_increment for f in users.fields)  # AUTO_INCREMENT applied
     assert any(r.to_table_id and r.from_table_id for r in s.logical.relations)  # FK rebuilt
+
+
+def _drift_design() -> dict:
+    """Leg A (designed): users(id uuid, email, phone) + a not-yet-migrated drafts table. The uuid PK is
+    CHAR(36) on MySQL — the FK lesson the drift comparison must respect (no spurious type drift)."""
+    return sj.load({
+        "formatVersion": "1.0.0",
+        "meta": {"name": "shop", "databaseType": "mysql", "defaultDriver": "mysql"},
+        "logical": {"tables": [
+            {"id": "tbl_users0001", "name": "users", "kind": "normal", "fields": [
+                {"id": "fld_uid000001", "name": "id", "semanticType": "uuid",
+                 "isPrimaryKey": True, "nullable": False},
+                {"id": "fld_uemail001", "name": "email", "semanticType": "email", "nullable": False},
+                {"id": "fld_uphone001", "name": "phone", "semanticType": "string", "nullable": True},
+            ]},
+            {"id": "tbl_drafts001", "name": "drafts", "kind": "normal", "fields": [
+                {"id": "fld_did000001", "name": "id", "semanticType": "uuid",
+                 "isPrimaryKey": True, "nullable": False},
+            ]},
+        ]},
+    }, validate=False)
+
+
+@pytest.mark.live_mysql
+def test_live_mysql_three_way_drift_reports_categories_and_respects_fk_type():
+    """drift on a **real MySQL** (multi-driver §2): the same six-category classification Postgres gives,
+    via the driver pattern (introspect/apply through the MySQL driver, not a separate code path), and
+    the FK lesson — a uuid PK that is CHAR(36) on MySQL is *not* mis-reported as type drift.
+
+    Legs are built by applying DDL and introspecting (resetting the shadow DB between), so a single
+    dedicated MySQL database is enough; it is a throwaway shadow, never a real one (the round-trip drops
+    its tables)."""
+    dsn = _dsn_or_skip()
+    drv = get_driver("mysql")
+    try:
+        # Leg B (migrations): users(id, email, phone).
+        drv.reset(dsn)
+        drv.apply_sql(dsn, ["CREATE TABLE `users` (`id` CHAR(36) NOT NULL, `email` VARCHAR(255) NOT NULL, "
+                            "`phone` VARCHAR(255) NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;"])
+        migrations = sj.load(build_schema_json(drv.introspect(dsn), driver="mysql")["schema_json"], validate=False)
+        # Leg C (live): phone never applied; a manual `hotfix` column was added straight on prod instead.
+        drv.reset(dsn)
+        drv.apply_sql(dsn, ["CREATE TABLE `users` (`id` CHAR(36) NOT NULL, `email` VARCHAR(255) NOT NULL, "
+                            "`hotfix` VARCHAR(255) NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB;"])
+        live = sj.load(build_schema_json(drv.introspect(dsn), driver="mysql")["schema_json"], validate=False)
+
+        report = three_way_drift(_drift_design(), migrations, live, driver="mysql")
+        by_entity = {d.entity: d.category for d in report.drift}
+        assert by_entity.get("users.phone") == "migration_not_applied"
+        assert by_entity.get("users.hotfix") == "manual_prod_change"
+        assert by_entity.get("drafts") == "design_ahead_of_code"
+        assert report.exit_code == 1
+        # The FK lesson on MySQL: the uuid PK (CHAR(36) on MySQL) is synced across all legs, never drift.
+        assert "users.id" not in by_entity
+    finally:
+        drv.reset(dsn)

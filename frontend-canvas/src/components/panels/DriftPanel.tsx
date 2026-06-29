@@ -23,6 +23,16 @@ function categoryOf(c: string) {
   return CATEGORY[c] ?? { label: c, dot: "bg-muted-foreground" };
 }
 
+/** The driver is determined from the connection string (multi-driver §3): a `mysql://`/`mariadb://`
+ *  DSN compares against MySQL, anything else (incl. `postgresql://`) against Postgres. Passed through
+ *  so a MySQL connection runs the same drift as Postgres; the engine also infers this server-side. */
+function driverFromDsn(dsn: string): string | undefined {
+  const scheme = dsn.trim().split("://", 1)[0].toLowerCase();
+  if (scheme === "mysql" || scheme === "mariadb") return "mysql";
+  if (scheme === "postgres" || scheme === "postgresql") return "postgres";
+  return undefined;
+}
+
 function DriftRow({ d }: { d: DriftEntry }) {
   const { dot } = categoryOf(d.category);
   return (
@@ -49,7 +59,7 @@ export function DriftPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const run = async () => {
     if (!dsn.trim() || driftBusy) return;
     setError(null);
-    const res = await compareWithDatabase(dsn.trim());
+    const res = await compareWithDatabase(dsn.trim(), driverFromDsn(dsn));
     if (!res.ok) setError(res.error ?? "compare failed");
   };
 
@@ -86,7 +96,7 @@ export function DriftPanel({ open, onClose }: { open: boolean; onClose: () => vo
               value={dsn}
               onChange={(e) => setDsn(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && void run()}
-              placeholder="postgresql://user:pass@host:5432/dbname"
+              placeholder="postgresql://… or mysql://user:pass@host:3306/dbname"
               aria-label="Live database connection string"
               className="mt-1 font-mono"
             />

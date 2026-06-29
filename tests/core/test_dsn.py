@@ -58,3 +58,17 @@ def test_in_container_env_override(monkeypatch):
     assert core_dsn.in_container() is True
     monkeypatch.setenv("VDB_IN_CONTAINER", "0")
     assert core_dsn.in_container() is False
+
+
+# --- driver inferred from the connection (multi-driver §3) ---------------------------------------
+def test_driver_for_dsn_infers_mysql_and_postgres():
+    assert core_dsn.driver_for_dsn("mysql://root:pw@host:3306/db") == "mysql"
+    assert core_dsn.driver_for_dsn("mariadb://root:pw@host:3306/db") == "mysql"
+    assert core_dsn.driver_for_dsn("postgresql://u:p@host:5432/db") == "postgres"
+    assert core_dsn.driver_for_dsn("postgres://u:p@host/db") == "postgres"
+
+
+def test_driver_for_dsn_is_none_for_unknown_or_blank():
+    assert core_dsn.driver_for_dsn(None) is None
+    assert core_dsn.driver_for_dsn("") is None
+    assert core_dsn.driver_for_dsn("sqlite:///tmp/x.db") is None

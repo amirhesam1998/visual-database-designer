@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from app.core import schema_json as sj
-from app.core.drift import reconcile, three_way_drift
+from app.core.drift import _physical_map, reconcile, three_way_drift
+from app.core.type_system import DEFAULT_REGISTRY
 
 
 def _schema(tables: list[dict]) -> sj.SchemaJson:
@@ -91,6 +92,56 @@ def test_live_type_diverged_is_manual_prod_change():
     report = three_way_drift(a, b, c)
     entry = next(d for d in report.drift if d.entity == "users.age")
     assert entry.category == "manual_prod_change" and entry.kind == "type"
+
+
+# --- driver-aware type resolution (multi-driver §2 — the FK lesson on MySQL) ----------------------
+
+
+def _fk_design() -> sj.SchemaJson:
+    """orders.user_id is a foreign_key onto users.id (a uuid PK) — the FK lesson fixture."""
+    return sj.load({
+        "formatVersion": "1.0.0",
+        "meta": {"name": "shop", "databaseType": "mysql", "defaultDriver": "mysql"},
+        "logical": {
+            "tables": [
+                {"id": "tbl_usr00001", "name": "users", "kind": "normal", "fields": [
+                    {"id": "fld_uid00001", "name": "id", "semanticType": "uuid",
+                     "isPrimaryKey": True, "nullable": False},
+                    {"id": "fld_uem00001", "name": "email", "semanticType": "email", "nullable": False},
+                ]},
+                {"id": "tbl_ord00001", "name": "orders", "kind": "normal", "fields": [
+                    {"id": "fld_oid00001", "name": "id", "semanticType": "uuid",
+                     "isPrimaryKey": True, "nullable": False},
+                    {"id": "fld_ous00001", "name": "user_id", "semanticType": "foreign_key", "nullable": False},
+                ]},
+            ],
+            "relations": [
+                {"id": "rel_ord_usr1", "name": "belongsTo", "type": "one_to_many",
+                 "fromTableId": "tbl_ord00001", "toTableId": "tbl_usr00001",
+                 "foreignKeyFieldId": "fld_ous00001", "onDelete": "cascade"},
+            ],
+        },
+    }, validate=False)
+
+
+def test_physical_map_is_driver_aware():
+    """A uuid PK resolves to ``uuid`` on Postgres and ``CHAR(36)`` on MySQL, and the FK column inherits
+    the referenced PK's type on each driver — so a designed FK never shows as spurious type drift."""
+    s = _fk_design()
+    pg = _physical_map(s, DEFAULT_REGISTRY, "postgres")
+    my = _physical_map(s, DEFAULT_REGISTRY, "mysql")
+    assert pg[("users", "id")] == "uuid"
+    assert pg[("orders", "user_id")] == "uuid"  # FK inherits the PK's type
+    assert my[("users", "id")].lower().startswith("char(36)")
+    assert my[("orders", "user_id")].lower().startswith("char(36)")  # FK inherits the PK's type
+
+
+def test_uuid_fk_is_not_spurious_drift_on_mysql():
+    """All three legs carry the same design; under the MySQL driver a uuid/foreign_key column resolves
+    to CHAR(36) consistently, so there is zero type drift (the FK lesson, multi-driver §2)."""
+    s = _fk_design()
+    report = three_way_drift(s, s, s, driver="mysql")
+    assert report.drift == [] and report.exit_code == 0
 
 
 # --- reconcile (§2.3) -----------------------------------------------------------------------------
