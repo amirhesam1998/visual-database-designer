@@ -33,9 +33,8 @@ RUN pip install --no-cache-dir /sdk
 COPY services/modules/visual-database-designer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY services/modules/visual-database-designer/app /app/app
-# The drag & drop canvas (served at /canvas for the interactive designer).
-COPY services/modules/visual-database-designer/frontend /app/frontend
-# The built read-only Canvas SPA from stage 1 (served at /designer/).
+# The built Canvas SPA from stage 1 — the sole UI, served at /designer/ (the legacy no-build
+# /canvas SPA was removed).
 COPY --from=canvas-build /canvas/dist /app/frontend-canvas/dist
 
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \

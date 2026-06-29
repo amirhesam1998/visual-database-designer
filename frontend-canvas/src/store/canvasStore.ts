@@ -5,6 +5,7 @@ import {
   createBaselineSession,
   diffSchema,
   driftAgainstDatabase,
+  fetchInsights,
   fetchRenderModel,
   fetchSessionDoc,
   fetchTypes,
@@ -24,6 +25,7 @@ import type {
   ChangeColor,
   DiffResult,
   DriftReport,
+  Insight,
   RelationType,
   RenderModel,
   RenderTable,
@@ -87,6 +89,9 @@ interface CanvasState {
   drift: DriftReport | null;
   driftBusy: boolean;
 
+  // design insights (intelligence milestone) — engine-sourced, advisory, refreshed after every edit
+  insights: Insight[];
+
   selectedTableId: string | null;
   hoveredTableId: string | null;
   search: string;
@@ -119,6 +124,11 @@ interface CanvasState {
   removeEnum: (enumId: string) => Promise<void>;
   addIndex: (tableId: string, index: { columns: string[]; unique?: boolean; type?: string }) => Promise<void>;
   removeIndex: (indexId: string) => Promise<void>;
+  /** Mark a field as sensitive (PII) via a privacy override — used to confirm a §3 suggestion. */
+  markSensitive: (tableId: string, fieldId: string, sensitivity?: string) => Promise<void>;
+  /** Apply a design insight's action through the normal edit + validate path (spec §5). No-op if the
+   *  insight carries no action (a fact/explanatory finding). */
+  applyInsight: (insight: Insight) => Promise<void>;
 
   /** Replace the whole working document (e.g. an engine-generated schema from a PRD), then re-render. */
   replaceDoc: (doc: SchemaDoc) => Promise<void>;
@@ -156,6 +166,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   approved: null,
   drift: null,
   driftBusy: false,
+  insights: [],
   selectedTableId: null,
   hoveredTableId: null,
   search: "",
@@ -175,6 +186,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         savedSignature: edit.schemaSignature(doc),
         approved: null,
         drift: null,
+        insights: [],
         past: [],
         future: [],
       });
@@ -196,14 +208,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     if (!doc) return;
     const model = await fetchRenderModel({ schemaJson: doc }); // throws → caller sets error state
     set({ model, validating: true });
-    const [val, df] = await Promise.allSettled([
+    const [val, df, ins] = await Promise.allSettled([
       validateSchema(doc),
       baseline ? diffSchema(baseline, doc) : Promise.resolve(null),
+      fetchInsights(doc),
     ]);
     set({
       validating: false,
       ...(val.status === "fulfilled" ? { validation: val.value } : {}),
       ...(df.status === "fulfilled" ? { diff: df.value } : {}),
+      ...(ins.status === "fulfilled" ? { insights: ins.value.insights } : {}),
     });
   },
 
@@ -274,6 +288,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   removeEnum: (enumId) => get().mutate((d) => edit.removeEnum(d, enumId)),
   addIndex: (tableId, index) => get().mutate((d) => edit.addIndex(d, tableId, index).doc),
   removeIndex: (indexId) => get().mutate((d) => edit.removeIndex(d, indexId)),
+  markSensitive: (tableId, fieldId, sensitivity) =>
+    get().mutate((d) => edit.markFieldSensitive(d, tableId, fieldId, sensitivity)),
+
+  // Apply a design insight by translating its structured action into the SAME structural edits the
+  // user could make by hand (spec §5): adding an index / marking a field sensitive both go through
+  // `mutate` → `refresh`, so they are validated, diffed and undoable like any other change. The
+  // intelligence never bypasses the engine — and the insight list re-derives on the next refresh, so
+  // a resolved suggestion simply disappears. Unknown/action-less findings are a no-op.
+  applyInsight: async (insight) => {
+    const a = insight.action;
+    if (!a) return;
+    if (a.type === "add_index" && a.table_id && a.columns && a.columns.length > 0) {
+      await get().addIndex(a.table_id, { columns: a.columns, unique: !!a.unique });
+    } else if (a.type === "mark_sensitive" && a.table_id && a.field_id) {
+      await get().markSensitive(a.table_id, a.field_id, a.sensitivity ?? undefined);
+    }
+  },
 
   // Replace the working doc wholesale (PRD generation). It becomes the new diff base too — a freshly
   // generated schema is the starting point, not a delta from whatever was loaded before (spec §1).
@@ -516,6 +547,37 @@ export function driftColors(drift: DriftReport | null, model: RenderModel | null
 
 export function driftIsEmpty(drift: DriftReport | null): boolean {
   return !drift || drift.drift.length === 0;
+}
+
+// ---- insight selectors (intelligence milestone) ------------------------------------------------
+// Pure projections of the engine's insight list — the canvas decides nothing, it only groups what the
+// engine returned. `byEntity` powers the in-context canvas badges; `counts` powers the toolbar tally.
+
+/** Group insights by the entity (table/field/relation id) they point at (spec §4 — in-context badge).
+ *  Schema-level findings (no entity_id, e.g. naming convention) are intentionally excluded here. */
+export function insightsByEntity(insights: Insight[]): Map<string, Insight[]> {
+  const map = new Map<string, Insight[]>();
+  for (const i of insights) {
+    if (!i.entity_id) continue;
+    const list = map.get(i.entity_id) ?? [];
+    list.push(i);
+    map.set(i.entity_id, list);
+  }
+  return map;
+}
+
+/** Tally for the toolbar/panel: certain facts vs. heuristic suggestions, and how many are applicable
+ *  (carry an action). Keeps the spec's fact/suggestion split visible at a glance (spec §0/§4). */
+export function insightCounts(insights: Insight[]): { facts: number; suggestions: number; actionable: number } {
+  let facts = 0;
+  let suggestions = 0;
+  let actionable = 0;
+  for (const i of insights) {
+    if (i.kind === "fact") facts++;
+    else suggestions++;
+    if (i.action) actionable++;
+  }
+  return { facts, suggestions, actionable };
 }
 
 export function severityCounts(report: ValidationReport | null): { errors: number; warnings: number } {

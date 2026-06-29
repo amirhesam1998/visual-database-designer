@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, Copy, Download, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import {
@@ -9,11 +9,13 @@ import {
   type CodeFrameworks,
   type CodeKind,
 } from "@/lib/api";
+import { downloadText } from "@/lib/download";
 import { useCanvasStore } from "@/store/canvasStore";
 
-// The Code panel surfaces the engine's generation (unify spec phase 2 §1/§2). It NEVER generates code
-// itself: `sql` + `openapi` are engine-native; `model`/`crud`/`schema` go through the server-side
-// bridge that reuses the proven generators. The panel only picks options and shows returned text.
+// The Code panel surfaces the engine's generation (unify spec phase 2 + export-formats milestone). It
+// NEVER generates anything itself: `sql`/`openapi` and the text exports (`yaml`/`dbml`/`jsonschema`/
+// `datadict`) are engine-native; `model`/`crud`/`schema` go through the server-side bridge that reuses
+// the proven generators. The panel only picks options, shows the returned text, and copies/downloads it.
 type Kind = CodeKind | "openapi";
 
 const KIND_LABEL: Record<Kind, string> = {
@@ -22,6 +24,23 @@ const KIND_LABEL: Record<Kind, string> = {
   model: "ORM model",
   crud: "CRUD controller",
   schema: "Schema export",
+  yaml: "YAML",
+  dbml: "DBML (dbdiagram)",
+  jsonschema: "JSON Schema",
+  datadict: "Data dictionary",
+};
+
+// File extension + MIME for the Download button (the artifact is plain text either way).
+const DOWNLOAD_AS: Record<Kind, { ext: string; mime: string }> = {
+  sql: { ext: "sql", mime: "text/plain" },
+  openapi: { ext: "json", mime: "application/json" },
+  model: { ext: "txt", mime: "text/plain" },
+  crud: { ext: "txt", mime: "text/plain" },
+  schema: { ext: "txt", mime: "text/plain" },
+  yaml: { ext: "yaml", mime: "text/yaml" },
+  dbml: { ext: "dbml", mime: "text/plain" },
+  jsonschema: { ext: "schema.json", mime: "application/json" },
+  datadict: { ext: "md", mime: "text/markdown" },
 };
 
 export function CodePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -31,6 +50,7 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
   const [frameworks, setFrameworks] = useState<CodeFrameworks | null>(null);
   const [kind, setKind] = useState<Kind>("sql");
   const [framework, setFramework] = useState("");
+  const [driver, setDriver] = useState("postgres");
   const [table, setTable] = useState("");
   const [content, setContent] = useState("");
   const [busy, setBusy] = useState(false);
@@ -68,7 +88,10 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
       const out =
         kind === "openapi"
           ? await generateOpenApi(doc)
-          : await generateCode({ schemaJson: doc, kind, framework: framework || undefined, table: tableName });
+          : await generateCode({
+              schemaJson: doc, kind, framework: framework || undefined, table: tableName,
+              driver: kind === "sql" ? driver : undefined,
+            });
       setContent(out);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -87,6 +110,13 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
     } catch {
       /* clipboard unavailable */
     }
+  };
+
+  const download = () => {
+    if (!content) return;
+    const { ext, mime } = DOWNLOAD_AS[kind];
+    const base = (kind === "model" || kind === "crud" ? table || tables[0]?.name : kind) || "export";
+    downloadText(`${base}.${ext}`, content, mime);
   };
 
   if (!open) return null;
@@ -111,6 +141,18 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
             ))}
           </Select>
         </label>
+        {kind === "sql" && (
+          <label className="flex flex-col gap-1 text-2xs text-muted-foreground">
+            Database
+            <Select value={driver} onChange={(e) => setDriver(e.target.value)} aria-label="Target database" className="w-32">
+              {(frameworks?.sql ?? ["postgres", "mysql"]).map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </Select>
+          </label>
+        )}
         {frameworkOptions.length > 0 && (
           <label className="flex flex-col gap-1 text-2xs text-muted-foreground">
             Framework
@@ -144,16 +186,16 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
         {error && <p className="p-4 text-2xs text-destructive">{error}</p>}
         {!error && content && (
           <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={copy}
-              aria-label="Copy code"
-              className="absolute right-3 top-3 gap-1.5"
-            >
-              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied ? "Copied" : "Copy"}
-            </Button>
+            <div className="absolute right-3 top-3 flex gap-1.5">
+              <Button variant="outline" size="sm" onClick={download} aria-label="Download" className="gap-1.5">
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </Button>
+              <Button variant="outline" size="sm" onClick={copy} aria-label="Copy code" className="gap-1.5">
+                {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied ? "Copied" : "Copy"}
+              </Button>
+            </div>
             <pre className="overflow-x-auto p-4 pt-12 font-mono text-2xs leading-relaxed text-foreground">{content}</pre>
           </>
         )}

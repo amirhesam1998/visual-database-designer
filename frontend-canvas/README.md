@@ -44,14 +44,15 @@ changes" indicator and the diff ride on the schema signature, which ignores `pre
   select + <kbd>Delete</kbd> to remove; drag to reposition.
 - **Toolbar:** **Generate** a schema from a description (greenfield session → suggest → apply),
   **Import** an existing database (live or SQL file), add table, manage **Enums**, undo/redo, zoom
-  in/out/fit/**1:1**, an "unsaved" indicator, a validation summary, the **Code** panel, **Compare DB**
-  (drift), **Changes**, and **Approve**.
+  in/out/fit/**1:1**, an "unsaved" indicator, a validation summary, the **Insights** panel, the
+  **Code** panel, **Compare DB** (drift), **Changes**, and **Approve**.
 
 ## Open an existing database (import & connect)
-- **Import** opens a dialog with two engine-backed sources (`/design/import`): a **live** Postgres
-  connection (connection string or host/port/db/user/pass) or a **SQL/DDL file** (applied to a
-  server-side *shadow* database, then introspected — the browser never parses SQL). A uuid foreign key
-  comes back as `uuid` because the engine reads the type from the database.
+- **Import** opens a dialog with a **Database** selector (**PostgreSQL** or **MySQL/MariaDB**) and two
+  engine-backed sources (`/design/import`): a **live** connection (connection string or
+  host/port/db/user/pass) or a **SQL/DDL file** (applied to a server-side *shadow* database, then
+  introspected — the browser never parses SQL). A uuid foreign key comes back as `uuid` because the
+  engine reads the type from the database — on MySQL a `CHAR(36)` key is recognised as uuid.
 - Ambiguous reverse-inferences the engine flags are shown for you to confirm before loading (AD-5);
   nothing is auto-applied. The imported map is a brownfield baseline — edit it, then diff/approve.
 - The connection string is used once and never persisted in the UI.
@@ -62,12 +63,30 @@ changes" indicator and the diff ride on the schema signature, which ignores `pre
   database, or has a different type. It also tints the canvas (design-only = green, type drift =
   yellow). Report-only — nothing is ever written back to the database.
 
+## Insights (design assistant)
+- **Insights** sends the working schema to `/design/insights` and shows the engine's deterministic
+  analysis: index advice, design warnings and sensitive-field detection. The panel keeps the two
+  natures apart (spec §0) — **Issues** are certain facts (no primary key, an FK whose type doesn't
+  match the key it references, a redundant index); **Suggestions** are heuristic guesses (a column
+  whose *name* looks sensitive). Each finding shows a severity and a plain-language "why".
+- Findings with an action expose an **Add index** / **Mark sensitive** button. Clicking it makes the
+  *same* structural edit you could make by hand — it goes through validate + diff and is undoable;
+  nothing is auto-applied (AD-5). The finding disappears on the next analysis because the schema
+  changed. Flagged tables/fields also get a small badge on the canvas so you see them in context.
+
 ## Generate from a description & code generation
 - **Generate** sends a product description to the engine (`/design/sessions` greenfield + `suggest` +
   `apply-suggestion`) and loads the suggested schema — generation is the engine's, not the browser's.
 - **Code** panel produces SQL DDL and OpenAPI 3.1 natively from the engine, plus ORM models, CRUD
-  controllers and framework schema exports through the server-side bridge (`POST /design/code`). The
-  bridge preserves FK physical types (a uuid FK stays uuid) and semantic types in translation.
+  controllers and framework schema exports through the server-side bridge (`POST /design/code`). For
+  SQL it offers a **Database** dropdown (**PostgreSQL / MySQL**) so the DDL matches the target dialect —
+  same `schema_json`, different output (a uuid PK is `uuid` on Postgres, `CHAR(36)` on MySQL, and the FK
+  column follows). The bridge preserves FK physical types and semantic types in translation.
+- The same panel also offers deterministic documentation/interchange exports — **YAML, DBML
+  (dbdiagram.io), JSON Schema and a Markdown data dictionary** (with PII/sensitive marks) — generated
+  by the engine from `schema_json` with resolved types. Every artifact has **Copy** and **Download**.
+- **Export ERD** (toolbar) saves the current diagram as **SVG / PNG / PDF** — captured client-side
+  from the React Flow canvas (the only client-side export; display-only, never a schema change).
 - The Mermaid ERD tab from the old canvas was intentionally dropped — the canvas itself is a live ERD.
 
 ## Diff & approve (Milestone 3)

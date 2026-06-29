@@ -100,11 +100,20 @@ analysis — never auto-applying anything.
   a brownfield baseline you can edit, then diff/approve.
 - **Compare with database** (`/design/drift`): three-way drift (design ↔ migrations ↔ live), shown as
   a readable report **and** reflected on the canvas (design-only = green, type drift = yellow).
+- **Insights** panel (`/design/insights`): a deterministic design assistant — index advice, design
+  warnings and sensitive-field detection. Certain **facts** (no PK, FK type mismatch, redundant index)
+  are kept separate from heuristic **suggestions** (a column that *looks* sensitive); every finding has
+  a severity and a "why", and an applicable one (Add index / Mark sensitive) is applied through the
+  normal edit + validate path — nothing auto-applies (AD-5). Flagged tables/fields get a canvas badge.
 - Duplicate tables (fresh Stable IDs), reusable named enums, explicit/composite indexes, table
   description/domain, and a timestamps/soft-delete toggle that expands to **real** datetime columns.
 - Diff vs the approved base + the engine approval gate (`/core/diff` + `/core/risk` + sessions).
-- **Code** panel: SQL DDL & OpenAPI (engine-native) plus ORM models, CRUD controllers and framework
-  schema exports through the server-side code-gen **bridge** (`/design/code`).
+- **Code** panel: SQL DDL & OpenAPI (engine-native), ORM models, CRUD controllers and framework
+  schema exports through the server-side code-gen **bridge**, plus deterministic documentation/
+  interchange exports — **YAML, DBML (dbdiagram.io), JSON Schema and a Markdown data dictionary** —
+  all from `/design/code` with resolved types (a uuid FK stays uuid). Every artifact has Copy + Download.
+- **Export ERD** (toolbar): the current diagram as **SVG / PNG / PDF** (captured from the canvas —
+  display-only, like the presentation layer; not a schema change).
 - Search/filter, undo/redo (50-deep), zoom in/out/fit/100%, light & dark themes.
 
 > The Mermaid ERD tab was intentionally **not** migrated — the canvas itself is a live ERD.
@@ -244,10 +253,14 @@ visual-database-designer/
 │       ├── diff.py                 # Diff Engine (operation list, three-way conflict detect)
 │       ├── risk.py                 # Migration Risk Analyzer (levels, safe plan, SARIF, exit codes)
 │       ├── state_machine.py        # State Machine Designer (one definition → 6 outputs)
-│       ├── sql_emitter.py          # SQL Emitter (Postgres up/down DDL from the operation list)
+│       ├── sql_emitter.py          # SQL Emitter (driver-agnostic orchestration; up/down DDL via the dialect)
+│       ├── drivers/                # Driver pattern: per-DB dialect + introspection + reverse type map
+│       │   ├── base.py             #   Introspected* models, SqlDialect, Driver protocol, render_physical
+│       │   ├── postgres.py         #   PostgreSQL driver (the refactored first implementation)
+│       │   └── mysql.py            #   MySQL/MariaDB driver (uuid→CHAR(36), TINYINT(1), AUTO_INCREMENT)
 │       ├── design_session.py       # DesignSession + SessionStore (M1 state machine + approval gate)
 │       ├── suggest.py              # AI suggest (the only LLM touchpoint of the greenfield path)
-│       ├── importer.py             # M2 brownfield: introspect_postgres + build_schema_json + apply_sql
+│       ├── importer.py             # Brownfield build (pure) + driver-dispatched introspect/apply/shadow
 │       ├── drift.py                # M2 three-way drift: reconcile + three_way_drift + SARIF
 │       └── seeder.py               # M3 scenario seeder: deterministic, FK/enum/state-consistent data
 │
@@ -317,18 +330,36 @@ visual-database-designer/
 - **`diff`** — `diff()` → `DiffResult.op_dicts()` (the ordered operation list); `three_way_diff()`.
 - **`risk`** — `analyze()` → `RiskReport` (`RiskLevel`, `OperationRisk`, `gate()`, `checklist()`,
   `to_sarif()`).
-- **`sql_emitter`** — `emit_sql(operations, schema, driver="postgres")` → `SqlScript`
-  (`up_statements()`, `down_statements()`, `requires_backup`).
+- **`sql_emitter`** — `emit_sql(operations, schema, driver="postgres"|"mysql")` → `SqlScript`
+  (`up_statements()`, `down_statements()`, `requires_backup`). Driver-agnostic orchestration; the
+  per-DB syntax comes from the dialect.
+- **`drivers`** — the database extension point (multi-driver milestone). `get_driver(name)` /
+  `get_dialect(name)` resolve a `Driver` (postgres | mysql, mariadb→mysql alias) bundling a
+  `SqlDialect` (emit), `introspect`/`apply_sql`/`reset` (impure I/O) and the reverse type map
+  (`column_physical`, `is_autoincrement`, `semantic_override`). Adding a third DB is a new module here
+  — the Core never changes. The FK lesson lives once in the Type System's driver-aware
+  `resolve_fk_physical` (uuid PK → `uuid` on Postgres, `CHAR(36)` on MySQL; the FK column follows).
 - **`design_session`** — `DesignSession`, `SessionStore` (the M1 state machine + approval gate);
   exceptions `SessionNotFoundError` (404), `InvalidTransitionError` (409), `GateBlockedError` (409).
 - **`suggest`** — `suggest_schema(prd, llm=None)` (greenfield AI suggestion + deterministic normalize).
-- **`importer`** — `introspect_postgres(dsn)` (impure), `build_schema_json()` (pure/deterministic),
-  `apply_sql()` (shadow-DB applier), `split_sql()`, `import_sql_via_shadow(sql, shadowDsn)` (file
-  import: apply a DDL dump to a shadow DB then introspect it), `enrich_ambiguous()`.
+- **`importer`** — `build_schema_json(introspected, driver=…)` (pure/deterministic),
+  `introspect_postgres(dsn)` / `introspect_mysql(dsn)` (impure, delegated to the drivers),
+  `apply_sql()`, `split_sql()`, `import_sql_via_shadow(sql, shadowDsn, driver=…)` (file import: apply a
+  DDL dump to a shadow DB then introspect it), `enrich_ambiguous()`.
 - **`drift`** — `reconcile()`, `three_way_drift()` → `DriftReport` (`DriftEntry`, `to_sarif()`,
   `exit_code`).
 - **`seeder`** — `seed_data(schema_json, seed, scenario, output)` → `{rows, sql|data, warnings}`;
   `topological_order()`, `resolve_scenario()`, `SeedError` (NOT NULL FK cycle), `enrich_text()`.
+- **`schema_export`** — `export(schema, kind)` → deterministic documentation/interchange text from
+  `schema_json` with resolved types: `to_yaml()`, `to_dbml()`, `to_json_schema()`,
+  `to_data_dictionary()` (Markdown, with PII/sensitive marks). The ERD *image* (SVG/PNG/PDF) is the
+  one client-side export — captured from the canvas, not generated here.
+- **`insights`** — `analyze(schema)` → `InsightReport` (the design assistant). Deterministic, LLM-free
+  rule packs: index advisor (FK without index, frequently-searched columns, redundant index), design
+  warnings (no PK, varchar-without-length, FK↔PK type mismatch, missing ON DELETE, island table, mixed
+  naming) and sensitive-field detection (certain PII by type + heuristic by column name). Each `Insight`
+  carries a `kind` (**fact** vs **suggestion**, spec §0), a `severity`, a mandatory `why`, and an
+  optional structured `action` (`add_index` / `mark_sensitive`) the canvas applies via a normal edit.
 
 ### "Controllers" & "views"
 There are no MVC controllers — the HTTP layer is FastAPI route functions defined in
@@ -416,8 +447,9 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/design/code` | `{schema_json, kind, framework?, table?, methods?}` → `{content}`. `kind`: `sql` (engine-native) \| `model` \| `crud` \| `schema`. ORM/CRUD/exports reuse the proven generators via the `schema_json → DatabaseSchema` bridge — FK physical types (uuid stays uuid) and semantic types are preserved in translation. |
-| GET  | `/design/code/frameworks` | `{sql, model, crud, crudMethods, schema}` lists for the Code panel's dropdowns |
+| POST | `/design/code` | `{schema_json, kind, framework?, table?, methods?, driver?}` → `{content, language}`. `kind`: `sql` (engine-native; `driver` = `postgres` default \| `mysql`) \| `model` \| `crud` \| `schema` (via the bridge) \| `yaml` \| `dbml` \| `jsonschema` \| `datadict` (deterministic text exports from `schema_json` with resolved types — a uuid FK stays uuid). |
+| GET  | `/design/code/frameworks` | `{sql, model, crud, crudMethods, schema, text}` lists for the Code panel's dropdowns |
+| POST | `/design/insights` | `{schema\|schema_json}` → `{insights:[{rule_id, category, kind, severity, title, why, entityId, tableId, fieldId, fix, action}], summary}`. Deterministic design assistant (index advice, design warnings, sensitive-field detection); facts vs suggestions kept separate, every finding explained, an applicable one carries an `add_index`/`mark_sensitive` action the UI applies via the normal edit path (nothing auto-applies). |
 
 ### Core (deterministic `schema_json`) endpoints
 
@@ -450,10 +482,20 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/design/import`                  | live: `{dsn, name?, enrich?}` · file: `{sql\|ddl, shadowDsn? (else `VDB_SHADOW_DSN`), name?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}` |
+| POST | `/design/import`                  | live: `{dsn, name?, driver?, enrich?}` · file: `{sql\|ddl, shadowDsn? (else `VDB_SHADOW_DSN`), name?, driver?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}`. `driver` = `postgres` default \| `mysql` (a MySQL `CHAR(36)` key comes back as uuid). |
 | POST | `/design/sessions` (brownfield)   | `{mode:"brownfield", importDsn \| schema_json}` → session with `baselineSource:"import"` |
 | POST | `/design/drift`                   | `{designed, live\|liveDsn, migrations\|migrationsDsn\|(migrationsDir+shadowDsn), sarif?}` → `{reconcile, drift, summary, exitCode, sarif?}` |
 | GET  | `/capabilities`                   | capability manifest (modes, drivers, drift categories, scenarios, guarantees) |
+
+> **Connecting from a container (host smartness):** the Designer runs inside a container, so a
+> `localhost` / `127.0.0.1` DSN points at the *container*, not your machine. Live-DSN endpoints
+> (`/design/import`, `/design/run-e2e`, drift legs) **auto-rewrite** `localhost` → `host.docker.internal`
+> when running in a container (passwords with `@`/special chars are preserved); a failed connection to a
+> local host returns a `hint`. Detection can be forced via the `VDB_IN_CONTAINER` env var.
+>
+> **File import (phpMyAdmin / mysqldump):** `split_sql` strips interleaved comments (`-- `, `#`,
+> `/* … */` incl. `/*! … */`) and respects string/backtick/dollar quoting, so comment-preceded
+> `CREATE TABLE`s are no longer dropped (the bug that made a real dump import zero tables).
 
 ### Scenario seeder (Milestone 3)
 
@@ -715,9 +757,10 @@ module runs fully offline (templates + heuristics + deterministic Core).
 (`postgresql`|`mysql`|`mongodb`|`sqlite`), `ai_suggestions` (default `true`), `import_type` (for
 `existing_database`), and `feature_request` (may be threaded via `ctx.settings`).
 
-**Driver support note:** the simple-layer exporters support several drivers; the **Core** SQL emitter,
-importer and drift are **Postgres-only** (Milestone scope). Live import/drift require a reachable
-Postgres DSN and the `psycopg` driver.
+**Driver support note:** the **Core** SQL emitter and importer support **PostgreSQL and MySQL/MariaDB**
+via the driver pattern (`app/core/drivers/`) — pick the target with `driver` on `/design/code` and
+`/design/import`. Three-way drift is still Postgres-only. Live import requires a reachable DSN and the
+matching driver (`psycopg` for Postgres, `PyMySQL` for MySQL).
 
 **Container:** `Dockerfile` builds on `python:3.12-slim`, installs the SDK then `requirements.txt`,
 copies `app/` + `frontend/`, runs as a non-root user, exposes `9107`, and health-checks `/health`.
@@ -734,7 +777,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
 - **`jsonschema`** — structural validation of `schema_json` against the bundled JSON Schema. *(Required
   at import time — without it the service fails to boot.)*
 - **`psycopg[binary]`** — Postgres driver for brownfield import / shadow-DB apply / drift. *(Imported
-  lazily; only needed when actually touching a database.)*
+  lazily; only needed when actually touching a Postgres database.)*
+- **`PyMySQL`** — MySQL/MariaDB driver for the MySQL importer / shadow-DB apply. *(Pure-Python,
+  imported lazily; only needed when actually touching a MySQL database.)*
 - **Frontend (CDN, no install):** React 18, ReactDOM, React Flow 11, Mermaid 11.
 
 ---
@@ -746,8 +791,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
   pipeline operate on different representations.
 - **Design sessions are in-memory.** They do not survive a restart and are not shared across replicas;
   a persistent store is not yet implemented.
-- **Core SQL emitter / importer / drift are Postgres-only** (Milestone scope). Other drivers exist only
-  in the simple-layer exporters.
+- **Core SQL emitter + importer support Postgres and MySQL/MariaDB**; three-way **drift** is still
+  Postgres-only. A third database (SQL Server, SQLite, …) is a new module under `app/core/drivers/`,
+  not a Core change.
 - **Migrations "leg" is raw SQL only.** Three-way drift's Leg B applies raw-SQL files to a shadow DB (or
   uses a prepared shadow DSN); framework-specific migration runners (Laravel/Prisma/Alembic) are not yet
   implemented. There is **no ORM-model AST scanner** (that would be a future fourth leg).
@@ -767,7 +813,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
 - A **bridge/adapter** between `DatabaseSchema` and `schema_json` so the canvas and the Core pipeline
   share one representation.
 - **Persistent design sessions** (DB-backed `SessionStore`) for multi-replica/production use.
-- **Multi-driver Core** — extend the SQL emitter, importer and risk rules to MySQL/SQLite/etc.
+- **Multi-driver Core** — PostgreSQL and MySQL/MariaDB ship via the driver pattern
+  (`app/core/drivers/`); SQL Server, SQLite and Oracle are each just a new driver module now. Bringing
+  three-way **drift** to MySQL is the next step.
 - **Framework migration runners** for Leg B (apply Laravel/Prisma/Alembic migrations to the shadow DB
   via adapters) and an **ORM-model AST scanner** as a fourth drift leg.
 - **Phase-2 generators** driven by the Core Type System (API / Form / Admin / GDPR projections). The
@@ -802,8 +850,16 @@ cd services/modules/visual-database-designer
   VDB_TEST_POSTGRES_DSN="postgresql://postgres:vdb@localhost:5433/postgres" \
     ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_postgres -v
   ```
-- Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`. Lint with
-  `ruff check app tests`.
+- **Live-MySQL tests** (marked `live_mysql`, `tests/milestones/test_m5_mysql.py`) are the multi-driver
+  gate — same opt-in contract, set `VDB_TEST_MYSQL_DSN` (a dedicated shadow DB; the round-trip drops
+  tables), e.g.:
+  ```bash
+  docker run --rm -d --name vdb-my -e MYSQL_ROOT_PASSWORD=vdb -e MYSQL_DATABASE=vdb_shadow -p 3307:3306 mysql:8
+  VDB_TEST_MYSQL_DSN="mysql://root:vdb@127.0.0.1:3307/vdb_shadow" \
+    ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_mysql -v
+  ```
+- Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`, `-m live_mysql`.
+  Lint with `ruff check app tests`.
 ```
-Current status: 284 passed + 6 skipped (live, green when run on a server), ruff clean.
+Current status: 367 passed + 14 skipped (live Postgres/MySQL, green when run on a server), ruff clean.
 ```

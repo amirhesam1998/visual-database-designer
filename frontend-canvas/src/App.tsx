@@ -8,6 +8,7 @@ import { ImportDialog } from "@/components/canvas/ImportDialog";
 import { Toolbar } from "@/components/panels/Toolbar";
 import { CodePanel } from "@/components/panels/CodePanel";
 import { DriftPanel } from "@/components/panels/DriftPanel";
+import { InsightsPanel } from "@/components/panels/InsightsPanel";
 import { DetailsPanel } from "@/components/panels/DetailsPanel";
 import { DiffPanel } from "@/components/panels/DiffPanel";
 import { EmptyState, ErrorState, LoadingState } from "@/components/panels/States";
@@ -42,6 +43,14 @@ export default function App() {
   const [showEnums, setShowEnums] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showDrift, setShowDrift] = useState(false);
+  const [showInsights, setShowInsights] = useState(false);
+
+  // Code, Drift and Insights share the right-hand dock, so opening one closes the others.
+  const closeRightDock = () => {
+    setShowCode(false);
+    setShowDrift(false);
+    setShowInsights(false);
+  };
 
   return (
     <ReactFlowProvider>
@@ -50,10 +59,11 @@ export default function App() {
           onApprove={() => setShowApprove(true)}
           onToggleDiff={() => setShowDiff((v) => !v)}
           onGenerate={() => setShowGenerate(true)}
-          onCode={() => { setShowDrift(false); setShowCode((v) => !v); }}
+          onCode={() => { const next = !showCode; closeRightDock(); setShowCode(next); }}
           onEnums={() => setShowEnums(true)}
           onImport={() => setShowImport(true)}
-          onDrift={() => { setShowCode(false); setShowDrift((v) => !v); }}
+          onDrift={() => { const next = !showDrift; closeRightDock(); setShowDrift(next); }}
+          onInsights={() => { const next = !showInsights; closeRightDock(); setShowInsights(next); }}
         />
         <div className="flex min-h-0 flex-1">
           <main className="relative min-w-0 flex-1">
@@ -64,6 +74,7 @@ export default function App() {
             <DiffPanel open={showDiff} onClose={() => setShowDiff(false)} />
             <CodePanel open={showCode} onClose={() => setShowCode(false)} />
             <DriftPanel open={showDrift} onClose={() => setShowDrift(false)} />
+            <InsightsPanel open={showInsights} onClose={() => setShowInsights(false)} />
           </main>
           <DetailsPanel />
         </div>

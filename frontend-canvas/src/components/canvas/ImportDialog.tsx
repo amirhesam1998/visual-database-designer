@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Database, FileUp, Loader2, Plug } from "lucide-react";
+import { BookmarkPlus, Database, FileUp, Loader2, Plug, X } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { importLiveDatabase, importSqlDump } from "@/lib/api";
 import { useCanvasStore } from "@/store/canvasStore";
+import { useSavedConnections, type SavedConnection } from "@/store/savedConnections";
 import type { ImportResult, ImportSuggestion } from "@/lib/types";
 import type { SchemaDoc } from "@/lib/schema";
 
@@ -16,19 +18,29 @@ import type { SchemaDoc } from "@/lib/schema";
 
 type Mode = "connect" | "file";
 
-/** Build a libpq DSN from the parts, or pass the raw connection string straight through. */
-function assembleDsn(p: { dsn: string; host: string; port: string; database: string; user: string; password: string }): string {
+/** Build a connection DSN from the parts, or pass the raw connection string straight through. The
+ *  scheme + default port follow the selected driver (Postgres 5432 / MySQL 3306). */
+function assembleDsn(
+  p: { dsn: string; host: string; port: string; database: string; user: string; password: string },
+  driver: string,
+): string {
   if (p.dsn.trim()) return p.dsn.trim();
   const auth = p.user ? `${encodeURIComponent(p.user)}${p.password ? `:${encodeURIComponent(p.password)}` : ""}@` : "";
   const host = p.host.trim() || "localhost";
-  const port = p.port.trim() || "5432";
-  return `postgresql://${auth}${host}:${port}/${p.database.trim() || "postgres"}`;
+  const isMysql = driver === "mysql";
+  const port = p.port.trim() || (isMysql ? "3306" : "5432");
+  const scheme = isMysql ? "mysql" : "postgresql";
+  return `${scheme}://${auth}${host}:${port}/${p.database.trim() || (isMysql ? "mysql" : "postgres")}`;
 }
 
 export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const replaceDoc = useCanvasStore((s) => s.replaceDoc);
+  const savedConnections = useSavedConnections((s) => s.connections);
+  const saveConnection = useSavedConnections((s) => s.save);
+  const removeConnection = useSavedConnections((s) => s.remove);
 
   const [mode, setMode] = useState<Mode>("connect");
+  const [driver, setDriver] = useState("postgres");
   const [dsn, setDsn] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
@@ -46,10 +58,27 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
     setPending(null);
   };
 
+  // Fill the form from a saved connection. The password is never stored, so it's left blank to
+  // re-enter (spec §3). Clearing the DSN field makes the "parts" the active source.
+  const loadConnection = (c: SavedConnection) => {
+    setDsn("");
+    setDriver(c.driver);
+    setHost(c.host); setPort(c.port); setDatabase(c.database); setUser(c.user);
+    setPassword("");
+    reset();
+  };
+
+  // Save the current connection parts (never the password). Available once a host/database is entered.
+  const onSaveConnection = () => {
+    if (!host.trim() && !database.trim()) return;
+    const label = `${user.trim() || "db"}@${host.trim() || "localhost"}/${database.trim()}`.replace(/\/$/, "");
+    saveConnection({ label, driver, host: host.trim(), port: port.trim(), database: database.trim(), user: user.trim() });
+  };
+
   const close = () => {
     // The connection string is sensitive — never keep it around once the dialog closes (spec §1).
     setDsn(""); setHost(""); setPort(""); setDatabase(""); setUser(""); setPassword("");
-    setFileName(""); setSql(""); reset(); setBusy(false);
+    setFileName(""); setSql(""); setDriver("postgres"); reset(); setBusy(false);
     onClose();
   };
 
@@ -60,8 +89,8 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
     try {
       const result =
         mode === "connect"
-          ? await importLiveDatabase(assembleDsn({ dsn, host, port, database, user, password }))
-          : await importSqlDump(sql);
+          ? await importLiveDatabase(assembleDsn({ dsn, host, port, database, user, password }, driver), undefined, driver)
+          : await importSqlDump(sql, undefined, driver);
       const suggestions = result.inference?.suggestions ?? [];
       if (suggestions.length > 0) {
         setPending(result); // pause on ambiguous types for the human to confirm (AD-5)
@@ -109,6 +138,21 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
           </button>
         </div>
 
+        {!pending && (
+          <label className="flex items-center justify-between gap-2 text-2xs font-medium text-muted-foreground">
+            Database
+            <Select
+              value={driver}
+              onChange={(e) => { setDriver(e.target.value); reset(); }}
+              aria-label="Database type"
+              className="w-40"
+            >
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql">MySQL / MariaDB</option>
+            </Select>
+          </label>
+        )}
+
         {pending ? (
           <ConfirmInference
             result={pending}
@@ -119,19 +163,56 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
         ) : mode === "connect" ? (
           <div className="space-y-2">
             <p className="text-2xs text-muted-foreground">
-              Connect to a Postgres database. The engine introspects it into a map (a uuid foreign key
-              stays uuid). The connection string is used once and never stored.
+              Connect to a {driver === "mysql" ? "MySQL/MariaDB" : "Postgres"} database. The engine
+              introspects it into a map (a uuid foreign key stays uuid — on MySQL a CHAR(36) key is
+              recognised as uuid). The connection string is used once and never stored.
             </p>
+
+            {savedConnections.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-2xs font-medium text-muted-foreground">Saved connections</p>
+                <ul className="space-y-1">
+                  {savedConnections.map((c) => (
+                    <li key={c.id} className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => loadConnection(c)}
+                        className="flex-1 truncate rounded border border-border px-2 py-1 text-left text-2xs hover:bg-muted"
+                        title="Load this connection (you'll re-enter the password)"
+                      >
+                        <span className="font-medium text-foreground">{c.label || `${c.user}@${c.host}`}</span>
+                        <span className="text-muted-foreground"> · {c.driver}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Delete saved connection ${c.label}`}
+                        onClick={() => removeConnection(c.id)}
+                        className="rounded p-1 text-muted-foreground hover:text-destructive"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-2xs text-muted-foreground">Passwords are never saved — re-enter the password to connect.</p>
+              </div>
+            )}
             <label className="block text-2xs font-medium text-muted-foreground">
               Connection string
               <Input
                 value={dsn}
                 onChange={(e) => setDsn(e.target.value)}
-                placeholder="postgresql://user:pass@host:5432/dbname"
+                placeholder={driver === "mysql" ? "mysql://user:pass@host:3306/dbname" : "postgresql://user:pass@host:5432/dbname"}
                 aria-label="Connection string"
                 className="mt-1 font-mono"
               />
             </label>
+            <p className="rounded border border-amber-300/40 bg-amber-50/50 px-2 py-1.5 text-2xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400">
+              <strong>Host tip:</strong> <code>localhost</code> means “this same machine”. The Designer runs
+              inside a container, so for a database on <em>your computer</em> use{" "}
+              <code>host.docker.internal</code>; for a remote server use its real IP/hostname.
+              (<code>localhost</code> is rewritten automatically when possible.)
+            </p>
             <p className="text-center text-2xs text-muted-foreground">— or enter the parts —</p>
             <div className="grid grid-cols-2 gap-2">
               <LabeledInput label="Host" value={host} onChange={setHost} placeholder="localhost" disabled={!!dsn.trim()} />
@@ -139,6 +220,19 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
               <LabeledInput label="Database" value={database} onChange={setDatabase} placeholder="app" disabled={!!dsn.trim()} />
               <LabeledInput label="User" value={user} onChange={setUser} placeholder="postgres" disabled={!!dsn.trim()} />
               <LabeledInput label="Password" value={password} onChange={setPassword} type="password" disabled={!!dsn.trim()} className="col-span-2" />
+            </div>
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                type="button"
+                onClick={onSaveConnection}
+                disabled={!!dsn.trim() || (!host.trim() && !database.trim())}
+                className="gap-1 text-2xs"
+                title="Save host/port/database/user for next time (the password is never saved)"
+              >
+                <BookmarkPlus className="h-3 w-3" /> Save connection
+              </Button>
             </div>
           </div>
         ) : (

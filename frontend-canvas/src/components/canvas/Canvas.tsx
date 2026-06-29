@@ -22,6 +22,7 @@ import {
   driftColors,
   findingsByEntity,
   focusNeighbours,
+  insightsByEntity,
   isErrorSeverity,
   matchingTableIds,
   useCanvasStore,
@@ -43,7 +44,7 @@ export function Canvas({ model }: { model: RenderModel }) {
   const base = useMemo(() => buildGraph(model), [model]);
   const [nodes, setNodes, onNodesChange] = useNodesState<TableNodeData>(base.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RelationEdgeData>(base.edges);
-  const { getNodes } = useReactFlow();
+  const { getNodes, fitView } = useReactFlow();
 
   // Re-seed the graph whenever a new (engine-resolved) schema arrives (endpoint → state → render).
   useEffect(() => {
@@ -58,6 +59,7 @@ export function Canvas({ model }: { model: RenderModel }) {
   const search = useCanvasStore((s) => s.search);
   const editable = useCanvasStore((s) => s.editable);
   const validation = useCanvasStore((s) => s.validation);
+  const insights = useCanvasStore((s) => s.insights);
   const diff = useCanvasStore((s) => s.diff);
   const drift = useCanvasStore((s) => s.drift);
   const commitPositions = useCanvasStore((s) => s.commitPositions);
@@ -72,7 +74,15 @@ export function Canvas({ model }: { model: RenderModel }) {
   const focusId = hoveredTableId ?? selectedTableId;
   const neighbours = useMemo(() => focusNeighbours(model, focusId), [model, focusId]);
   const matching = useMemo(() => matchingTableIds(model, search), [model, search]);
+
+  // Search jumps the viewport to the matching tables and frames them (spec §1.1 — "search that jumps
+  // to the table and highlights it"). Highlighting is handled by the dimming of non-matches below.
+  useEffect(() => {
+    if (!search?.trim() || !matching || matching.size === 0) return;
+    fitView({ nodes: [...matching].map((id) => ({ id })), duration: 400, padding: 0.35, maxZoom: 1.2 });
+  }, [search, matching, fitView]);
   const findings = useMemo(() => findingsByEntity(validation), [validation]);
+  const insightMap = useMemo(() => insightsByEntity(insights), [insights]);
   // Tint = the engine's diff (vs the base) merged with a live-database drift report (vs the DB), both
   // in the same colour language. Drift wins where they overlap — it's the user's current comparison.
   const colors = useMemo(() => {
@@ -94,12 +104,15 @@ export function Canvas({ model }: { model: RenderModel }) {
         const highlighted = !!neighbours && neighbours.nodeIds.has(n.id);
 
         const errorFieldIds = new Set<string>();
+        const insightFieldIds = new Set<string>();
         for (const f of n.data.table.fields) {
           if (findings.get(f.id)?.some((x) => isErrorSeverity(x.severity))) errorFieldIds.add(f.id);
+          if (insightMap.has(f.id)) insightFieldIds.add(f.id);
         }
         const hasError =
           errorFieldIds.size > 0 ||
           !!findings.get(n.id)?.some((x) => isErrorSeverity(x.severity));
+        const hasInsight = insightFieldIds.size > 0 || insightMap.has(n.id);
 
         return {
           ...n,
@@ -110,13 +123,15 @@ export function Canvas({ model }: { model: RenderModel }) {
             dimmed: !active,
             hasError,
             errorFieldIds,
+            hasInsight,
+            insightFieldIds,
             changeColor: colors.tables.get(n.id) ?? null,
             fieldChanges: colors.fields,
           },
           className: active ? undefined : "is-dimmed",
         };
       }),
-    [nodes, neighbours, matching, editable, findings, colors],
+    [nodes, neighbours, matching, editable, findings, insightMap, colors],
   );
 
   const displayEdges = useMemo<Edge<RelationEdgeData>[]>(
@@ -196,8 +211,11 @@ export function Canvas({ model }: { model: RenderModel }) {
         deleteKeyCode={editable ? ["Delete"] : null}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-        minZoom={0.15}
+        minZoom={0.05}
         maxZoom={2}
+        // Virtualise only large maps (render just what's on screen) — keeps 100+ tables smooth without
+        // changing behaviour for small schemas (and avoids breaking headless render in jsdom tests).
+        onlyRenderVisibleElements={model.tables.length > 50}
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="hsl(var(--canvas-dots))" />

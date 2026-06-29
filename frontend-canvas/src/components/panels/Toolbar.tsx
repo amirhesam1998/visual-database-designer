@@ -5,6 +5,7 @@ import {
   Code2,
   DatabaseZap,
   GitCompare,
+  Lightbulb,
   ListChecks,
   Maximize2,
   Moon,
@@ -23,7 +24,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
-import { diffIsEmpty, isDirty, severityCounts, useCanvasStore } from "@/store/canvasStore";
+import { ErdExportMenu } from "@/components/panels/ErdExportMenu";
+import { diffIsEmpty, insightCounts, isDirty, severityCounts, useCanvasStore } from "@/store/canvasStore";
 
 interface ToolbarProps {
   onApprove: () => void;
@@ -33,9 +35,10 @@ interface ToolbarProps {
   onEnums: () => void;
   onImport: () => void;
   onDrift: () => void;
+  onInsights: () => void;
 }
 
-export function Toolbar({ onApprove, onToggleDiff, onGenerate, onCode, onEnums, onImport, onDrift }: ToolbarProps) {
+export function Toolbar({ onApprove, onToggleDiff, onGenerate, onCode, onEnums, onImport, onDrift, onInsights }: ToolbarProps) {
   const { fitView, zoomIn, zoomOut, zoomTo } = useReactFlow();
   const search = useCanvasStore((s) => s.search);
   const setSearch = useCanvasStore((s) => s.setSearch);
@@ -52,12 +55,15 @@ export function Toolbar({ onApprove, onToggleDiff, onGenerate, onCode, onEnums, 
   const status = useCanvasStore((s) => s.status);
   const diff = useCanvasStore((s) => s.diff);
   const approved = useCanvasStore((s) => s.approved);
+  const insights = useCanvasStore((s) => s.insights);
   const dirty = useCanvasStore((s) => isDirty(s));
 
   const tableCount = model?.tables.length ?? 0;
   const relationCount = model?.relations.length ?? 0;
   const { errors, warnings } = severityCounts(validation);
   const changeCount = diff?.operations.length ?? 0;
+  const { facts: insightFacts, suggestions: insightSuggestions } = insightCounts(insights);
+  const insightCount = insightFacts + insightSuggestions;
   // Approve is enabled only when the engine has validated the changes with no errors (spec §2).
   const canApprove = !!validation?.valid && status === "ready" && !diffIsEmpty(diff);
   const approveHint = !validation?.valid
@@ -198,9 +204,21 @@ export function Toolbar({ onApprove, onToggleDiff, onGenerate, onCode, onEnums, 
         </Button>
       </Tooltip>
 
+      <ErdExportMenu />
+
       <Tooltip label="Compare your design with a live database">
         <Button variant="outline" size="sm" onClick={onDrift} aria-label="Compare with database" className="gap-1.5">
           <DatabaseZap className="h-4 w-4" /> Compare DB
+        </Button>
+      </Tooltip>
+
+      <Tooltip label="Design insights: index, design & privacy suggestions">
+        <Button variant="outline" size="sm" onClick={onInsights} aria-label="Open insights panel" className="gap-1.5">
+          <Lightbulb className="h-4 w-4" />
+          Insights
+          {insightCount > 0 && (
+            <span className="rounded-full bg-amber-500 px-1.5 text-2xs text-white">{insightCount}</span>
+          )}
         </Button>
       </Tooltip>
 

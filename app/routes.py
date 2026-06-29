@@ -39,9 +39,13 @@ from app.core import api_server as core_api_server
 from app.core import codegen_bridge as core_codegen
 from app.core import diff as core_diff
 from app.core import drift as core_drift
+from app.core import drivers as core_drivers
+from app.core import dsn as core_dsn
 from app.core import e2e as core_e2e
 from app.core import importer as core_importer
+from app.core import insights as core_insights
 from app.core import risk as core_risk
+from app.core import schema_export as core_schema_export
 from app.core import schema_json as core_sj
 from app.core import seeder as core_seeder
 from app.core import state_machine as core_sm
@@ -434,13 +438,14 @@ def register_interactive_routes(app: FastAPI) -> None:
     # schema, a human applies + validates + submits + approves it, then migration/handoff become
     # available *only* once approved.
     # ---------------------------------------------------------------------------------------------
-    def _import_db(dsn: str, name: str = "imported") -> dict:
-        """Introspect a live Postgres database into an import result (Milestone 2 §1)."""
-        introspected = core_importer.introspect_postgres(dsn)
-        return core_importer.build_schema_json(introspected, name=name)
+    def _import_db(dsn: str, name: str = "imported", driver: str = "postgres") -> dict:
+        """Introspect a live database into an import result (Milestone 2 §1; driver-aware, multi-driver §2)."""
+        dsn, _ = core_dsn.rewrite_host_for_container(dsn)  # localhost → host.docker.internal in a container (§4)
+        introspected = core_drivers.get_driver(driver).introspect(dsn)
+        return core_importer.build_schema_json(introspected, name=name, driver=driver)
 
-    def _introspect_schema(dsn: str, name: str) -> SchemaJson:
-        return core_sj.load(_import_db(dsn, name)["schema_json"], validate=False)
+    def _introspect_schema(dsn: str, name: str, driver: str = "postgres") -> SchemaJson:
+        return core_sj.load(_import_db(dsn, name, driver)["schema_json"], validate=False)
 
     @app.post("/design/sessions")
     async def design_create(request: dict) -> JSONResponse:
@@ -570,23 +575,29 @@ def register_interactive_routes(app: FastAPI) -> None:
     async def design_import(request: dict) -> JSONResponse:
         """Import an existing database into a Stable-ID schema_json (Milestone 2 §1 + file import).
 
-        Two sources, both reusing the M2 importer so reverse-inference is identical (a uuid FK stays
-        ``uuid``):
+        Two sources, both reusing the importer so reverse-inference is identical (a uuid FK stays
+        ``uuid`` on Postgres, ``CHAR(36)`` → ``uuid`` on MySQL):
 
-        * **live** — ``dsn`` introspects a running Postgres directly.
+        * **live** — ``dsn`` introspects a running database directly.
         * **file** — ``sql``/``ddl`` (a ``CREATE TABLE`` dump) is applied to a temporary *shadow*
           database, which is then introspected. The shadow DSN comes from the request (``shadowDsn``)
           or the ``VDB_SHADOW_DSN`` env var; the user's real database is never written to.
 
-        Deterministic reverse-inference first; when an LLM is configured (``enrich``) it only refines
-        the ambiguous columns (still carried as suggestions for the human to confirm — AD-5).
+        ``driver`` (``postgres`` default | ``mysql``) selects the database dialect for both paths
+        (multi-driver milestone §2/§4). Deterministic reverse-inference first; when an LLM is
+        configured (``enrich``) it only refines the ambiguous columns (AD-5).
         """
         name = request.get("name", "imported")
+        driver = request.get("driver", "postgres")
         sql = request.get("sql") or request.get("ddl")
+        original_dsn = request.get("dsn")
+        rewritten = False
         try:
             if sql is not None:
                 shadow_dsn = (
-                    request.get("shadowDsn") or request.get("shadow_dsn") or os.getenv("VDB_SHADOW_DSN")
+                    request.get("shadowDsn") or request.get("shadow_dsn")
+                    or os.getenv("VDB_SHADOW_DSN_MYSQL" if driver == "mysql" else "VDB_SHADOW_DSN")
+                    or os.getenv("VDB_SHADOW_DSN")
                 )
                 if not shadow_dsn:
                     return JSONResponse(
@@ -594,16 +605,27 @@ def register_interactive_routes(app: FastAPI) -> None:
                          "detail": "file import needs a shadow database; set VDB_SHADOW_DSN or pass shadowDsn"},
                         status_code=400,
                     )
-                result = core_importer.import_sql_via_shadow(sql, shadow_dsn, name=name)
+                shadow_dsn, _ = core_dsn.rewrite_host_for_container(shadow_dsn)
+                result = core_importer.import_sql_via_shadow(sql, shadow_dsn, name=name, driver=driver)
             else:
-                dsn = request.get("dsn")
-                if not dsn:
+                if not original_dsn:
                     return JSONResponse({"error": "missing dsn or sql"}, status_code=400)
-                result = _import_db(dsn, name)
+                # In a container, localhost points at the container; rewrite to reach the host's DB (§4).
+                dsn, rewritten = core_dsn.rewrite_host_for_container(original_dsn)
+                result = _import_db(dsn, name, driver)
         except Exception as exc:  # noqa: BLE001 - DB/driver/SQL errors are client-fixable → 400
-            return JSONResponse({"error": "import_failed", "detail": str(exc)}, status_code=400)
+            body = {"error": "import_failed", "detail": str(exc)}
+            hint = core_dsn.connection_hint(original_dsn) if original_dsn else None
+            if hint:
+                body["hint"] = hint
+            return JSONResponse(body, status_code=400)
         if request.get("enrich"):
             result = await core_importer.enrich_ambiguous(result, _env_llm())
+        if rewritten:
+            result["connectionNote"] = (
+                "Connected via host.docker.internal: 'localhost' was rewritten because the Designer runs "
+                "in a container. Use host.docker.internal for a database on your machine."
+            )
         return JSONResponse(result)
 
     @app.post("/design/drift")
@@ -692,6 +714,7 @@ def register_interactive_routes(app: FastAPI) -> None:
         dsn = request.get("dsn")
         if not dsn:
             return JSONResponse({"error": "missing dsn"}, status_code=400)
+        dsn, _ = core_dsn.rewrite_host_for_container(dsn)  # localhost → host.docker.internal in a container (§4)
         mode = request.get("mode", "greenfield")
         if mode not in {"greenfield", "brownfield"}:
             return JSONResponse({"error": f"unsupported mode {mode!r}"}, status_code=400)
@@ -776,6 +799,11 @@ def register_interactive_routes(app: FastAPI) -> None:
                 content = ";\n\n".join(script.up_statements())
                 content = content + ";\n" if content else "-- (empty schema)\n"
                 return JSONResponse({"kind": kind, "language": "sql", "content": content})
+            if kind in core_schema_export.SUPPORTED_KINDS:
+                # Deterministic documentation/interchange exports (YAML, DBML, JSON Schema, data
+                # dictionary) — generated from schema_json with resolved types (a uuid FK stays uuid).
+                content, language = core_schema_export.export(schema, kind)
+                return JSONResponse({"kind": kind, "language": language, "content": content})
             legacy = core_codegen.to_legacy_schema(schema)
             if kind == "model":
                 content = generate_model(legacy, request.get("framework", "laravel"), request.get("table"))
@@ -798,13 +826,37 @@ def register_interactive_routes(app: FastAPI) -> None:
         """Frameworks/targets the code-gen bridge offers (drives the Code panel's dropdowns)."""
         fw = supported_frameworks()
         return JSONResponse({
-            "sql": ["postgres"],
+            "sql": list(SUPPORTED_DRIVERS),
             "model": fw["model"],
             "crud": fw["crud"],
             "crudMethods": fw["crud_methods"],
             # `schema` = whole-schema exporters faithful to schema_json (mermaid intentionally dropped).
             "schema": ["prisma", "markdown", "django", "sqlalchemy", "typeorm", "sequelize"],
+            # `text` = deterministic documentation/interchange exports with no framework choice.
+            "text": list(core_schema_export.SUPPORTED_KINDS),
         })
+
+    @app.post("/design/insights")
+    async def design_insights(request: dict) -> JSONResponse:
+        """Deterministic design-assistant analysis of a ``schema_json`` (intelligence milestone).
+
+        Returns index suggestions, design warnings and sensitive-field detection — each with a
+        ``kind`` (certain *fact* vs. heuristic *suggestion*), a ``severity`` and a mandatory *why*
+        (spec §0/§6). Some findings carry a structured ``action`` the canvas applies through the
+        normal edit + validate path (spec §5); the engine never auto-applies anything. LLM-free and
+        reproducible: the same schema always yields the same insights.
+        """
+        payload = (
+            request.get("schema")
+            or request.get("schema_json")
+            or (request.get("handoff") or {}).get("schema_json")
+            or request
+        )
+        try:
+            schema = core_sj.load(core_sj.migrate(payload), validate=False)
+        except Exception as exc:  # noqa: BLE001 - malformed input → 400, not 500
+            return JSONResponse({"error": "invalid_schema_json", "detail": str(exc)}, status_code=400)
+        return JSONResponse(core_insights.analyze(schema).model_dump())
 
     @app.get("/capabilities")
     async def capabilities() -> JSONResponse:
@@ -830,11 +882,12 @@ def register_interactive_routes(app: FastAPI) -> None:
                 "api": ["/design/api/contract", "/design/api/server", "/design/api/client"],
                 "integration": ["/design/run-e2e"],
                 "codegen": ["/design/code", "/design/code/frameworks"],
+                "insights": ["/design/insights"],
                 # /designer is the single visual reference (the legacy /canvas SPA was removed). It is a
                 # thin shell over these engine endpoints — it decides nothing in the browser.
                 "designer": ["/designer", "/design/render", "/design/presentation", "/core/types",
                              "/core/validate", "/core/diff", "/core/risk", "/design/code",
-                             "/design/import", "/design/drift"],
+                             "/design/import", "/design/drift", "/design/insights"],
             },
             "driftCategories": ["synced", "migration_not_applied", "manual_prod_change",
                                 "design_ahead_of_code", "code_ahead_of_design", "migration_incomplete"],
@@ -847,6 +900,8 @@ def register_interactive_routes(app: FastAPI) -> None:
                 "seedSafety": "the seeder produces data/SQL; applying it is an explicit step (no auto-apply)",
                 "apiContract": "OpenAPI 3.1 is the source of truth; server & client derive from it (no auto-deploy)",
                 "endToEnd": "run-e2e chains the subsystems unchanged; each step's output is the next's input",
+                "insights": "design insights are deterministic & LLM-free; facts vs suggestions are kept "
+                            "separate and every applied suggestion goes through the normal edit+validate path",
             },
         })
 

@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { Handle, Position, useStore, type NodeProps } from "reactflow";
-import { AlertCircle, KeyRound, Link2, Lock, Table2 } from "lucide-react";
+import { AlertCircle, KeyRound, Lightbulb, Link2, Lock, Table2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CHANGE_NODE, CHANGE_ROW } from "@/lib/diffStyle";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -57,12 +57,14 @@ function FieldRow({
   tableId,
   editable,
   errored,
+  insightful,
   change,
 }: {
   field: RenderField;
   tableId: string;
   editable: boolean;
   errored: boolean;
+  insightful: boolean;
   change: ChangeColor | undefined;
 }) {
   const [editing, setEditing] = useState(false);
@@ -114,6 +116,11 @@ function FieldRow({
           <AlertCircle className="h-3 w-3 text-destructive" aria-label="field has an error" />
         </Tooltip>
       )}
+      {insightful && !errored && (
+        <Tooltip label="This field has a design insight — open Insights" side="top">
+          <Lightbulb className="h-3 w-3 text-amber-500" aria-label="field has an insight" />
+        </Tooltip>
+      )}
       {field.pii && (
         <Tooltip label={`Sensitive${field.sensitivity ? ` · ${field.sensitivity}` : ""}`} side="top">
           <Lock className="h-3 w-3 text-muted-foreground" aria-label="sensitive field" />
@@ -129,7 +136,7 @@ function FieldRow({
 
 function TableNodeImpl({ data, selected }: NodeProps<TableNodeData>) {
   const zoom = useStore((s) => s.transform[2]);
-  const { table, highlighted, dimmed, editable, hasError, errorFieldIds, changeColor, fieldChanges } = data;
+  const { table, highlighted, dimmed, editable, hasError, errorFieldIds, hasInsight, insightFieldIds, changeColor, fieldChanges } = data;
   const showFields = zoom >= FIELD_ZOOM_THRESHOLD;
   const [editingName, setEditingName] = useState(false);
   const updateTable = useCanvasStore((s) => s.updateTable);
@@ -173,6 +180,11 @@ function TableNodeImpl({ data, selected }: NodeProps<TableNodeData>) {
           </span>
         )}
         {hasError && <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label="table has errors" />}
+        {hasInsight && !hasError && (
+          <Tooltip label="This table has a design insight — open Insights" side="top">
+            <Lightbulb className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="table has an insight" />
+          </Tooltip>
+        )}
         {table.kind && table.kind !== "normal" && (
           <span className="rounded bg-accent px-1 text-2xs text-accent-foreground">{table.kind}</span>
         )}
@@ -187,6 +199,7 @@ function TableNodeImpl({ data, selected }: NodeProps<TableNodeData>) {
               tableId={table.id}
               editable={editable}
               errored={errorFieldIds.has(f.id)}
+              insightful={insightFieldIds.has(f.id)}
               change={fieldChanges.get(f.id)}
             />
           ))}
