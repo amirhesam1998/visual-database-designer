@@ -112,8 +112,15 @@ analysis — never auto-applying anything.
   schema exports through the server-side code-gen **bridge**, plus deterministic documentation/
   interchange exports — **YAML, DBML (dbdiagram.io), JSON Schema and a Markdown data dictionary** —
   all from `/design/code` with resolved types (a uuid FK stays uuid). Every artifact has Copy + Download.
-- **Export ERD** (toolbar): the current diagram as **SVG / PNG / PDF** (captured from the canvas —
-  display-only, like the presentation layer; not a schema change).
+- **Compare with database** now works for **MySQL as well as Postgres** — the driver is taken from the
+  connection (`mysql://` ⇒ MySQL), and the three-way drift uses the M5 driver pattern (introspect via
+  the right driver), with type comparison resolved per-driver so a uuid PK that is `CHAR(36)` on MySQL
+  is never mis-reported as drift.
+- **Export ERD** (toolbar): the current diagram as **SVG / PNG / PDF**, rendered **as vector graphics
+  straight from the schema data + canvas layout** (not a DOM screenshot), so it stays crisp at any size
+  — a 100+-table map exports cleanly. PDF can be **one scaled page** or **multi-page** (an A4 grid with
+  page numbers + slight overlap) for large diagrams. Display-only, like the presentation layer; not a
+  schema change.
 - Search/filter, undo/redo (50-deep), zoom in/out/fit/100%, light & dark themes.
 
 > The Mermaid ERD tab was intentionally **not** migrated — the canvas itself is a live ERD.
@@ -353,7 +360,8 @@ visual-database-designer/
 - **`schema_export`** — `export(schema, kind)` → deterministic documentation/interchange text from
   `schema_json` with resolved types: `to_yaml()`, `to_dbml()`, `to_json_schema()`,
   `to_data_dictionary()` (Markdown, with PII/sensitive marks). The ERD *image* (SVG/PNG/PDF) is the
-  one client-side export — captured from the canvas, not generated here.
+  one client-side export — rendered as vector SVG from the schema data + canvas layout (not a DOM
+  screenshot), with multi-page PDF tiling for large diagrams; not generated here.
 - **`insights`** — `analyze(schema)` → `InsightReport` (the design assistant). Deterministic, LLM-free
   rule packs: index advisor (FK without index, frequently-searched columns, redundant index), design
   warnings (no PK, varchar-without-length, FK↔PK type mismatch, missing ON DELETE, island table, mixed
@@ -757,10 +765,12 @@ module runs fully offline (templates + heuristics + deterministic Core).
 (`postgresql`|`mysql`|`mongodb`|`sqlite`), `ai_suggestions` (default `true`), `import_type` (for
 `existing_database`), and `feature_request` (may be threaded via `ctx.settings`).
 
-**Driver support note:** the **Core** SQL emitter and importer support **PostgreSQL and MySQL/MariaDB**
-via the driver pattern (`app/core/drivers/`) — pick the target with `driver` on `/design/code` and
-`/design/import`. Three-way drift is still Postgres-only. Live import requires a reachable DSN and the
-matching driver (`psycopg` for Postgres, `PyMySQL` for MySQL).
+**Driver support note:** the **Core** SQL emitter, importer **and three-way drift** support
+**PostgreSQL and MySQL/MariaDB** via the driver pattern (`app/core/drivers/`) — pick the target with
+`driver` on `/design/code` and `/design/import`, or let `/design/drift` infer it from the connection
+scheme (`mysql://` ⇒ MySQL). The drift comparison resolves types per-driver (a MySQL `CHAR(36)` uuid is
+not spurious drift). Live import/drift requires a reachable DSN and the matching driver (`psycopg` for
+Postgres, `PyMySQL` for MySQL); the migrations leg uses a shadow DB of the same engine.
 
 **Container:** `Dockerfile` builds on `python:3.12-slim`, installs the SDK then `requirements.txt`,
 copies `app/` + `frontend/`, runs as a non-root user, exposes `9107`, and health-checks `/health`.
@@ -791,9 +801,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
   pipeline operate on different representations.
 - **Design sessions are in-memory.** They do not survive a restart and are not shared across replicas;
   a persistent store is not yet implemented.
-- **Core SQL emitter + importer support Postgres and MySQL/MariaDB**; three-way **drift** is still
-  Postgres-only. A third database (SQL Server, SQLite, …) is a new module under `app/core/drivers/`,
-  not a Core change.
+- **Core SQL emitter, importer and three-way drift support Postgres and MySQL/MariaDB** via the driver
+  pattern. A third database (SQL Server, SQLite, …) is a new module under `app/core/drivers/`, not a
+  Core change.
 - **Migrations "leg" is raw SQL only.** Three-way drift's Leg B applies raw-SQL files to a shadow DB (or
   uses a prepared shadow DSN); framework-specific migration runners (Laravel/Prisma/Alembic) are not yet
   implemented. There is **no ORM-model AST scanner** (that would be a future fourth leg).
@@ -814,8 +824,8 @@ The build context **must be the repository root** (it needs `packages/module-sdk
   share one representation.
 - **Persistent design sessions** (DB-backed `SessionStore`) for multi-replica/production use.
 - **Multi-driver Core** — PostgreSQL and MySQL/MariaDB ship via the driver pattern
-  (`app/core/drivers/`); SQL Server, SQLite and Oracle are each just a new driver module now. Bringing
-  three-way **drift** to MySQL is the next step.
+  (`app/core/drivers/`), now including three-way **drift**; SQL Server, SQLite and Oracle are each just
+  a new driver module now.
 - **Framework migration runners** for Leg B (apply Laravel/Prisma/Alembic migrations to the shadow DB
   via adapters) and an **ORM-model AST scanner** as a fourth drift leg.
 - **Phase-2 generators** driven by the Core Type System (API / Form / Admin / GDPR projections). The
@@ -851,8 +861,9 @@ cd services/modules/visual-database-designer
     ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_postgres -v
   ```
 - **Live-MySQL tests** (marked `live_mysql`, `tests/milestones/test_m5_mysql.py`) are the multi-driver
-  gate — same opt-in contract, set `VDB_TEST_MYSQL_DSN` (a dedicated shadow DB; the round-trip drops
-  tables), e.g.:
+  gate — round-trip, the uuid-FK→`CHAR(36)` lesson, file import, **and three-way drift on a real
+  MySQL** (same six categories as Postgres). Same opt-in contract, set `VDB_TEST_MYSQL_DSN` (a dedicated
+  shadow DB; the tests drop its tables), e.g.:
   ```bash
   docker run --rm -d --name vdb-my -e MYSQL_ROOT_PASSWORD=vdb -e MYSQL_DATABASE=vdb_shadow -p 3307:3306 mysql:8
   VDB_TEST_MYSQL_DSN="mysql://root:vdb@127.0.0.1:3307/vdb_shadow" \
@@ -861,5 +872,6 @@ cd services/modules/visual-database-designer
 - Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`, `-m live_mysql`.
   Lint with `ruff check app tests`.
 ```
-Current status: 367 passed + 14 skipped (live Postgres/MySQL, green when run on a server), ruff clean.
+Current status: 386 passed + 16 skipped (live Postgres/MySQL, green when run on a server), ruff clean.
+Frontend: 87 passed (Vitest). The ERD export renders vector SVG from the schema data (no DOM capture).
 ```
