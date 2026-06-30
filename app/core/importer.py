@@ -41,7 +41,8 @@ from app.core.type_system import DEFAULT_REGISTRY, TypeRegistry, infer_semantic_
 __all__ = [
     "IntrospectedColumn", "IntrospectedTable", "IntrospectedForeignKey", "IntrospectedIndex",
     "IntrospectedEnum", "IntrospectedSchema", "introspect_postgres", "introspect_mysql",
-    "apply_sql", "split_sql", "import_sql_via_shadow", "build_schema_json", "enrich_ambiguous",
+    "introspect_sqlserver", "apply_sql", "split_sql", "import_sql_via_shadow", "build_schema_json",
+    "enrich_ambiguous",
 ]
 
 # Confidence below which a reverse-inference is treated as "ambiguous" and surfaced for human
@@ -65,6 +66,11 @@ def introspect_postgres(dsn: str, *, schema: str = "public") -> IntrospectedSche
 def introspect_mysql(dsn: str, *, schema: str | None = None) -> IntrospectedSchema:
     """Read a live MySQL/MariaDB schema into :class:`IntrospectedSchema` (impure; needs a driver)."""
     return core_drivers.get_driver("mysql").introspect(dsn, schema=schema)
+
+
+def introspect_sqlserver(dsn: str, *, schema: str | None = None) -> IntrospectedSchema:
+    """Read a live SQL Server schema into :class:`IntrospectedSchema` (impure; needs a driver)."""
+    return core_drivers.get_driver("sqlserver").introspect(dsn, schema=schema)
 
 
 def split_sql(text: str) -> list[str]:

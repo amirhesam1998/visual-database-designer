@@ -14,6 +14,7 @@ from typing import Any
 
 from app.core.drivers import mysql as _mysql
 from app.core.drivers import postgres as _postgres
+from app.core.drivers import sqlserver as _sqlserver
 from app.core.drivers.base import (
     Driver,
     IntrospectedColumn,
@@ -73,12 +74,18 @@ _DRIVERS: dict[str, _DriverImpl] = {
         _column_physical=_mysql.column_physical, _is_autoincrement=_mysql.is_autoincrement,
         _semantic_override=_mysql.semantic_override,
     ),
+    "sqlserver": _DriverImpl(
+        name="sqlserver", dialect=_sqlserver.SqlServerDialect(), default_schema="dbo",
+        _introspect=_sqlserver.introspect, _apply_sql=_sqlserver.apply_sql, _reset=_sqlserver.reset,
+        _column_physical=_sqlserver.column_physical, _is_autoincrement=_sqlserver.is_autoincrement,
+        _semantic_override=_sqlserver.semantic_override,
+    ),
 }
 
-# MariaDB speaks the MySQL protocol/dialect — alias it so a ``mariadb`` driver name just works.
-_ALIASES = {"mariadb": "mysql", "postgresql": "postgres"}
+# MariaDB speaks the MySQL dialect; ``mssql`` is the common short name for SQL Server — alias both.
+_ALIASES = {"mariadb": "mysql", "postgresql": "postgres", "mssql": "sqlserver"}
 
-SUPPORTED_DRIVERS: tuple[str, ...] = ("postgres", "mysql")
+SUPPORTED_DRIVERS: tuple[str, ...] = ("postgres", "mysql", "sqlserver")
 
 
 def get_driver(name: str | None) -> _DriverImpl:

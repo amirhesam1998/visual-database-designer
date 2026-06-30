@@ -278,7 +278,9 @@ def build_default_registry() -> TypeRegistry:
     defs: list[SemanticTypeDef] = [
         # --- string ---
         _t("string", "string", {"type": "varchar", "length": 255}, rules=["string", "max:255"]),
-        _t("text", "string", {"type": "text"}, rules=["string"], component="textarea", openapi={"type": "string"}),
+        _t("text", "string", {"type": "text"}, rules=["string"], component="textarea",
+           by_driver={"sqlserver": {"type": "nvarchar(max)"}},  # SQL Server: TEXT is deprecated → NVARCHAR(MAX)
+           openapi={"type": "string"}),
         _t(
             "email", "string", {"type": "varchar", "length": 255},
             rules=["email", "max:255"], component="email-input", pii=True, sensitivity="medium",
@@ -307,10 +309,12 @@ def build_default_registry() -> TypeRegistry:
             openapi={"type": "string", "pattern": "^[0-9]{10}$"},
         ),
         _t("uuid", "string", {"type": "uuid"}, rules=["uuid"],
-           by_driver={"mysql": {"type": "char", "length": 36}},  # MySQL has no native uuid → CHAR(36) (the FK lesson)
+           by_driver={"mysql": {"type": "char", "length": 36},  # MySQL has no native uuid → CHAR(36) (the FK lesson)
+                      "sqlserver": {"type": "uniqueidentifier"}},  # SQL Server has a native uuid type
            openapi={"type": "string", "format": "uuid"}),
         _t("color", "string", {"type": "varchar", "length": 9}, rules=["regex:^#"], component="color-picker"),
-        _t("markdown", "string", {"type": "text"}, component="markdown-editor"),
+        _t("markdown", "string", {"type": "text"}, component="markdown-editor",
+           by_driver={"sqlserver": {"type": "nvarchar(max)"}}),  # SQL Server: TEXT is deprecated → NVARCHAR(MAX)
         # --- numeric ---
         _t("integer", "numeric", {"type": "integer"}, rules=["integer"], component="number-input", fake="number",
            openapi={"type": "integer", "format": "int32"}),
@@ -333,24 +337,29 @@ def build_default_registry() -> TypeRegistry:
         _t("date", "temporal", {"type": "date"}, rules=["date"], component="date-picker", fake="date",
            openapi={"type": "string", "format": "date"}),
         _t("datetime", "temporal", {"type": "timestamp"}, rules=["date"], component="datetime-picker", fake="datetime",
-           by_driver={"mysql": {"type": "datetime"}},  # MySQL: DATETIME has the broad range a created/updated needs
+           by_driver={"mysql": {"type": "datetime"},  # MySQL: DATETIME has the broad range a created/updated needs
+                      "sqlserver": {"type": "datetime2"}},  # T-SQL TIMESTAMP is rowversion, not a clock → DATETIME2
            openapi={"type": "string", "format": "date-time"}),
         _t("timestamp", "temporal", {"type": "timestamp"}, rules=["date"], component="datetime-picker", fake="datetime",
+           by_driver={"sqlserver": {"type": "datetime2"}},  # T-SQL TIMESTAMP is rowversion, not a clock → DATETIME2
            openapi={"type": "string", "format": "date-time"}),
         _t("time", "temporal", {"type": "time"}, component="time-picker", openapi={"type": "string", "format": "time"}),
         _t("duration", "temporal", {"type": "integer"}, rules=["integer", "min:0"], component="number-input",
            openapi={"type": "integer"}),
         # --- logical / choice ---
         _t("boolean", "boolean", {"type": "boolean"}, rules=["boolean"], component="switch", fake="boolean",
-           by_driver={"mysql": {"type": "tinyint", "length": 1}},  # MySQL boolean → TINYINT(1)
+           by_driver={"mysql": {"type": "tinyint", "length": 1},  # MySQL boolean → TINYINT(1)
+                      "sqlserver": {"type": "bit"}},  # SQL Server has no BOOLEAN → BIT
            openapi={"type": "boolean"}),
         _t("enum", "choice", {"type": "varchar", "length": 64}, rules=["in_enum"], component="select", fake="enum"),
         _t("status", "choice", {"type": "varchar", "length": 64}, rules=["in_enum"], component="select", fake="enum"),
         # --- structural ---
         _t("json", "structural", {"type": "jsonb"},
-           by_driver={"mysql": {"type": "json"}}, component="key-value-editor", openapi={"type": "object"}),
+           by_driver={"mysql": {"type": "json"}, "sqlserver": {"type": "nvarchar(max)"}},  # MSSQL: no native json
+           component="key-value-editor", openapi={"type": "object"}),
         _t("array", "structural", {"type": "jsonb"},
-           by_driver={"mysql": {"type": "json"}}, component="tag-input", openapi={"type": "array"}),
+           by_driver={"mysql": {"type": "json"}, "sqlserver": {"type": "nvarchar(max)"}},  # MSSQL: stored as json text
+           component="tag-input", openapi={"type": "array"}),
         _t("foreign_key", "structural", {"type": "bigint"}, rules=["integer", "exists"], component="searchable-select",
            fake="foreign_ref", openapi={"type": "integer", "format": "int64"}),
         _t("morph_to", "structural", {"type": "varchar", "length": 255}, component="morph-select"),
@@ -365,7 +374,7 @@ def build_default_registry() -> TypeRegistry:
         _t(
             "vector_embedding", "ai", {"type": "vector", "dimension": 1536},
             by_driver={"postgres": {"type": "vector", "dimension": 1536}},
-            unsupported_on=["mysql", "sqlite"], component="hidden", fake="vector",
+            unsupported_on=["mysql", "sqlite", "sqlserver"], component="hidden", fake="vector",
             openapi={"type": "array", "items": {"type": "number"}},
         ),
     ]
