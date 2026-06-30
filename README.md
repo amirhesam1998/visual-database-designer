@@ -112,10 +112,10 @@ analysis — never auto-applying anything.
   schema exports through the server-side code-gen **bridge**, plus deterministic documentation/
   interchange exports — **YAML, DBML (dbdiagram.io), JSON Schema and a Markdown data dictionary** —
   all from `/design/code` with resolved types (a uuid FK stays uuid). Every artifact has Copy + Download.
-- **Compare with database** now works for **MySQL as well as Postgres** — the driver is taken from the
-  connection (`mysql://` ⇒ MySQL), and the three-way drift uses the M5 driver pattern (introspect via
-  the right driver), with type comparison resolved per-driver so a uuid PK that is `CHAR(36)` on MySQL
-  is never mis-reported as drift.
+- **Compare with database** works for **Postgres, MySQL/MariaDB and SQL Server** — the driver is taken
+  from the connection (`mysql://` ⇒ MySQL, `sqlserver://` ⇒ SQL Server), and the three-way drift uses
+  the driver pattern (introspect via the right driver), with type comparison resolved per-driver so a
+  uuid PK that is `CHAR(36)` on MySQL / `UNIQUEIDENTIFIER` on SQL Server is never mis-reported as drift.
 - **Export ERD** (toolbar): the current diagram as **SVG / PNG / PDF**, rendered **as vector graphics
   straight from the schema data + canvas layout** (not a DOM screenshot), so it stays crisp at any size
   — a 100+-table map exports cleanly. PDF can be **one scaled page** or **multi-page** (an A4 grid with
@@ -264,7 +264,8 @@ visual-database-designer/
 │       ├── drivers/                # Driver pattern: per-DB dialect + introspection + reverse type map
 │       │   ├── base.py             #   Introspected* models, SqlDialect, Driver protocol, render_physical
 │       │   ├── postgres.py         #   PostgreSQL driver (the refactored first implementation)
-│       │   └── mysql.py            #   MySQL/MariaDB driver (uuid→CHAR(36), TINYINT(1), AUTO_INCREMENT)
+│       │   ├── mysql.py            #   MySQL/MariaDB driver (uuid→CHAR(36), TINYINT(1), AUTO_INCREMENT)
+│       │   └── sqlserver.py        #   SQL Server driver (uuid→UNIQUEIDENTIFIER, BIT, DATETIME2, IDENTITY, NVARCHAR)
 │       ├── design_session.py       # DesignSession + SessionStore (M1 state machine + approval gate)
 │       ├── suggest.py              # AI suggest (the only LLM touchpoint of the greenfield path)
 │       ├── importer.py             # Brownfield build (pure) + driver-dispatched introspect/apply/shadow
@@ -341,16 +342,17 @@ visual-database-designer/
   (`up_statements()`, `down_statements()`, `requires_backup`). Driver-agnostic orchestration; the
   per-DB syntax comes from the dialect.
 - **`drivers`** — the database extension point (multi-driver milestone). `get_driver(name)` /
-  `get_dialect(name)` resolve a `Driver` (postgres | mysql, mariadb→mysql alias) bundling a
-  `SqlDialect` (emit), `introspect`/`apply_sql`/`reset` (impure I/O) and the reverse type map
-  (`column_physical`, `is_autoincrement`, `semantic_override`). Adding a third DB is a new module here
-  — the Core never changes. The FK lesson lives once in the Type System's driver-aware
-  `resolve_fk_physical` (uuid PK → `uuid` on Postgres, `CHAR(36)` on MySQL; the FK column follows).
+  `get_dialect(name)` resolve a `Driver` (postgres | mysql | sqlserver, with mariadb→mysql and
+  mssql→sqlserver aliases) bundling a `SqlDialect` (emit), `introspect`/`apply_sql`/`reset` (impure I/O)
+  and the reverse type map (`column_physical`, `is_autoincrement`, `semantic_override`). SQL Server was
+  added as exactly this — a new module + one registry line, Core untouched (the pattern's payoff). The
+  FK lesson lives once in the Type System's driver-aware `resolve_fk_physical` (uuid PK → `uuid` on
+  Postgres, `CHAR(36)` on MySQL, `UNIQUEIDENTIFIER` on SQL Server; the FK column follows).
 - **`design_session`** — `DesignSession`, `SessionStore` (the M1 state machine + approval gate);
   exceptions `SessionNotFoundError` (404), `InvalidTransitionError` (409), `GateBlockedError` (409).
 - **`suggest`** — `suggest_schema(prd, llm=None)` (greenfield AI suggestion + deterministic normalize).
 - **`importer`** — `build_schema_json(introspected, driver=…)` (pure/deterministic),
-  `introspect_postgres(dsn)` / `introspect_mysql(dsn)` (impure, delegated to the drivers),
+  `introspect_postgres(dsn)` / `introspect_mysql(dsn)` / `introspect_sqlserver(dsn)` (impure, delegated to the drivers),
   `apply_sql()`, `split_sql()`, `import_sql_via_shadow(sql, shadowDsn, driver=…)` (file import: apply a
   DDL dump to a shadow DB then introspect it), `enrich_ambiguous()`.
 - **`drift`** — `reconcile()`, `three_way_drift()` → `DriftReport` (`DriftEntry`, `to_sarif()`,
@@ -455,7 +457,7 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/design/code` | `{schema_json, kind, framework?, table?, methods?, driver?}` → `{content, language}`. `kind`: `sql` (engine-native; `driver` = `postgres` default \| `mysql`) \| `model` \| `crud` \| `schema` (via the bridge) \| `yaml` \| `dbml` \| `jsonschema` \| `datadict` (deterministic text exports from `schema_json` with resolved types — a uuid FK stays uuid). |
+| POST | `/design/code` | `{schema_json, kind, framework?, table?, methods?, driver?}` → `{content, language}`. `kind`: `sql` (engine-native; `driver` = `postgres` default \| `mysql` \| `sqlserver`) \| `model` \| `crud` \| `schema` (via the bridge) \| `yaml` \| `dbml` \| `jsonschema` \| `datadict` (deterministic text exports from `schema_json` with resolved types — a uuid FK stays uuid). |
 | GET  | `/design/code/frameworks` | `{sql, model, crud, crudMethods, schema, text}` lists for the Code panel's dropdowns |
 | POST | `/design/insights` | `{schema\|schema_json}` → `{insights:[{rule_id, category, kind, severity, title, why, entityId, tableId, fieldId, fix, action}], summary}`. Deterministic design assistant (index advice, design warnings, sensitive-field detection); facts vs suggestions kept separate, every finding explained, an applicable one carries an `add_index`/`mark_sensitive` action the UI applies via the normal edit path (nothing auto-applies). |
 
@@ -490,7 +492,7 @@ All endpoints are served by the single FastAPI app on **port 9107**.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/design/import`                  | live: `{dsn, name?, driver?, enrich?}` · file: `{sql\|ddl, shadowDsn? (else `VDB_SHADOW_DSN`), name?, driver?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}`. `driver` = `postgres` default \| `mysql` (a MySQL `CHAR(36)` key comes back as uuid). |
+| POST | `/design/import`                  | live: `{dsn, name?, driver?, enrich?}` · file: `{sql\|ddl, shadowDsn? (else `VDB_SHADOW_DSN`), name?, driver?}` → `{schema_json, inference:{confident,ambiguous,suggestions}, validation}`. `driver` = `postgres` default \| `mysql` \| `sqlserver` (a MySQL `CHAR(36)` / SQL Server `UNIQUEIDENTIFIER` key comes back as uuid). |
 | POST | `/design/sessions` (brownfield)   | `{mode:"brownfield", importDsn \| schema_json}` → session with `baselineSource:"import"` |
 | POST | `/design/drift`                   | `{designed, live\|liveDsn, migrations\|migrationsDsn\|(migrationsDir+shadowDsn), sarif?}` → `{reconcile, drift, summary, exitCode, sarif?}` |
 | GET  | `/capabilities`                   | capability manifest (modes, drivers, drift categories, scenarios, guarantees) |
@@ -766,11 +768,12 @@ module runs fully offline (templates + heuristics + deterministic Core).
 `existing_database`), and `feature_request` (may be threaded via `ctx.settings`).
 
 **Driver support note:** the **Core** SQL emitter, importer **and three-way drift** support
-**PostgreSQL and MySQL/MariaDB** via the driver pattern (`app/core/drivers/`) — pick the target with
-`driver` on `/design/code` and `/design/import`, or let `/design/drift` infer it from the connection
-scheme (`mysql://` ⇒ MySQL). The drift comparison resolves types per-driver (a MySQL `CHAR(36)` uuid is
-not spurious drift). Live import/drift requires a reachable DSN and the matching driver (`psycopg` for
-Postgres, `PyMySQL` for MySQL); the migrations leg uses a shadow DB of the same engine.
+**PostgreSQL, MySQL/MariaDB and SQL Server** via the driver pattern (`app/core/drivers/`) — pick the
+target with `driver` on `/design/code` and `/design/import`, or let `/design/drift` infer it from the
+connection scheme (`mysql://` ⇒ MySQL, `sqlserver://` ⇒ SQL Server). The drift comparison resolves types
+per-driver (a MySQL `CHAR(36)` / SQL Server `UNIQUEIDENTIFIER` uuid is not spurious drift). Live
+import/drift requires a reachable DSN and the matching driver (`psycopg` for Postgres, `PyMySQL` for
+MySQL, `pymssql` for SQL Server); the migrations leg uses a shadow DB of the same engine.
 
 **Container:** `Dockerfile` builds on `python:3.12-slim`, installs the SDK then `requirements.txt`,
 copies `app/` + `frontend/`, runs as a non-root user, exposes `9107`, and health-checks `/health`.
@@ -790,6 +793,8 @@ The build context **must be the repository root** (it needs `packages/module-sdk
   lazily; only needed when actually touching a Postgres database.)*
 - **`PyMySQL`** — MySQL/MariaDB driver for the MySQL importer / shadow-DB apply. *(Pure-Python,
   imported lazily; only needed when actually touching a MySQL database.)*
+- **`pymssql`** (or `pyodbc`) — SQL Server driver for the MSSQL importer / shadow-DB apply / drift.
+  *(Imported lazily; only needed when actually touching a SQL Server database.)*
 - **Frontend (CDN, no install):** React 18, ReactDOM, React Flow 11, Mermaid 11.
 
 ---
@@ -801,9 +806,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
   pipeline operate on different representations.
 - **Design sessions are in-memory.** They do not survive a restart and are not shared across replicas;
   a persistent store is not yet implemented.
-- **Core SQL emitter, importer and three-way drift support Postgres and MySQL/MariaDB** via the driver
-  pattern. A third database (SQL Server, SQLite, …) is a new module under `app/core/drivers/`, not a
-  Core change.
+- **Core SQL emitter, importer and three-way drift support Postgres, MySQL/MariaDB and SQL Server** via
+  the driver pattern. A fourth database (SQLite, Oracle, …) is a new module under `app/core/drivers/`,
+  not a Core change.
 - **Migrations "leg" is raw SQL only.** Three-way drift's Leg B applies raw-SQL files to a shadow DB (or
   uses a prepared shadow DSN); framework-specific migration runners (Laravel/Prisma/Alembic) are not yet
   implemented. There is **no ORM-model AST scanner** (that would be a future fourth leg).
@@ -823,9 +828,9 @@ The build context **must be the repository root** (it needs `packages/module-sdk
 - A **bridge/adapter** between `DatabaseSchema` and `schema_json` so the canvas and the Core pipeline
   share one representation.
 - **Persistent design sessions** (DB-backed `SessionStore`) for multi-replica/production use.
-- **Multi-driver Core** — PostgreSQL and MySQL/MariaDB ship via the driver pattern
-  (`app/core/drivers/`), now including three-way **drift**; SQL Server, SQLite and Oracle are each just
-  a new driver module now.
+- **Multi-driver Core** — PostgreSQL, MySQL/MariaDB and SQL Server ship via the driver pattern
+  (`app/core/drivers/`), including three-way **drift**; SQL Server's clean addition (a module + one
+  registry line, Core untouched) proved the pattern, so SQLite and Oracle are each just a new driver now.
 - **Framework migration runners** for Leg B (apply Laravel/Prisma/Alembic migrations to the shadow DB
   via adapters) and an **ORM-model AST scanner** as a fourth drift leg.
 - **Phase-2 generators** driven by the Core Type System (API / Form / Admin / GDPR projections). The
@@ -869,9 +874,19 @@ cd services/modules/visual-database-designer
   VDB_TEST_MYSQL_DSN="mysql://root:vdb@127.0.0.1:3307/vdb_shadow" \
     ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_mysql -v
   ```
-- Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`, `-m live_mysql`.
-  Lint with `ruff check app tests`.
+- **Live-SQL Server tests** (marked `live_sqlserver`, `tests/milestones/test_m6_sqlserver.py`) are the
+  third-database gate that proves the driver pattern generalises — round-trip, the uuid-FK→
+  `UNIQUEIDENTIFIER` lesson, **and three-way drift on a real SQL Server** (same six categories). Same
+  opt-in contract, set `VDB_TEST_SQLSERVER_DSN` (a dedicated shadow DB; the tests drop its tables), e.g.:
+  ```bash
+  docker run --rm -d --name vdb-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=vdbP@ssw0rd \
+    -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
+  VDB_TEST_SQLSERVER_DSN="sqlserver://sa:vdbP@ssw0rd@127.0.0.1:1433/master" \
+    ../../../packages/module-sdk-python/.venv/Scripts/python.exe -m pytest -m live_sqlserver -v
+  ```
+- Marker selection: `-m conformance`, `-m "not conformance"`, `-m live_postgres`, `-m live_mysql`,
+  `-m live_sqlserver`. Lint with `ruff check app tests`.
 ```
-Current status: 386 passed + 16 skipped (live Postgres/MySQL, green when run on a server), ruff clean.
-Frontend: 87 passed (Vitest). The ERD export renders vector SVG from the schema data (no DOM capture).
+Current status: 394 passed + 19 skipped (live Postgres/MySQL/SQL Server, green when run on a server),
+ruff clean. Frontend: 87 passed (Vitest). The ERD export renders vector SVG from the schema data.
 ```
