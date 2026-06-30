@@ -64,9 +64,9 @@ def rewrite_host_for_container(dsn: str, *, force: bool | None = None) -> tuple[
 
 def driver_for_dsn(dsn: str | None) -> str | None:
     """Infer the Core driver name from a DSN scheme (``mysql``/``mariadb`` → ``mysql``,
-    ``postgres``/``postgresql`` → ``postgres``). Returns ``None`` for an unknown/blank scheme so the
-    caller can fall back to its default — this is how "the driver is determined from the connection"
-    (multi-driver milestone §3) without the UI having to state it explicitly."""
+    ``postgres``/``postgresql`` → ``postgres``, ``sqlserver``/``mssql`` → ``sqlserver``). Returns
+    ``None`` for an unknown/blank scheme so the caller can fall back to its default — this is how "the
+    driver is determined from the connection" (multi-driver milestone §3) without the UI stating it."""
     if not dsn:
         return None
     try:
@@ -77,6 +77,8 @@ def driver_for_dsn(dsn: str | None) -> str | None:
         return "mysql"
     if scheme.startswith("postgres"):
         return "postgres"
+    if scheme.startswith(("sqlserver", "mssql")):
+        return "sqlserver"
     return None
 
 

@@ -18,19 +18,26 @@ import type { SchemaDoc } from "@/lib/schema";
 
 type Mode = "connect" | "file";
 
+/** Per-driver DSN defaults (scheme + port + fallback database name). The driver is then inferred back
+ *  from the scheme server-side, so adding a database is a row here, not a new branch. */
+const DRIVER_DSN: Record<string, { scheme: string; port: string; database: string }> = {
+  postgres: { scheme: "postgresql", port: "5432", database: "postgres" },
+  mysql: { scheme: "mysql", port: "3306", database: "mysql" },
+  sqlserver: { scheme: "sqlserver", port: "1433", database: "master" },
+};
+
 /** Build a connection DSN from the parts, or pass the raw connection string straight through. The
- *  scheme + default port follow the selected driver (Postgres 5432 / MySQL 3306). */
+ *  scheme + default port follow the selected driver (Postgres 5432 / MySQL 3306 / SQL Server 1433). */
 function assembleDsn(
   p: { dsn: string; host: string; port: string; database: string; user: string; password: string },
   driver: string,
 ): string {
   if (p.dsn.trim()) return p.dsn.trim();
+  const d = DRIVER_DSN[driver] ?? DRIVER_DSN.postgres;
   const auth = p.user ? `${encodeURIComponent(p.user)}${p.password ? `:${encodeURIComponent(p.password)}` : ""}@` : "";
   const host = p.host.trim() || "localhost";
-  const isMysql = driver === "mysql";
-  const port = p.port.trim() || (isMysql ? "3306" : "5432");
-  const scheme = isMysql ? "mysql" : "postgresql";
-  return `${scheme}://${auth}${host}:${port}/${p.database.trim() || (isMysql ? "mysql" : "postgres")}`;
+  const port = p.port.trim() || d.port;
+  return `${d.scheme}://${auth}${host}:${port}/${p.database.trim() || d.database}`;
 }
 
 export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -149,6 +156,7 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
             >
               <option value="postgres">PostgreSQL</option>
               <option value="mysql">MySQL / MariaDB</option>
+              <option value="sqlserver">SQL Server</option>
             </Select>
           </label>
         )}
@@ -163,9 +171,10 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
         ) : mode === "connect" ? (
           <div className="space-y-2">
             <p className="text-2xs text-muted-foreground">
-              Connect to a {driver === "mysql" ? "MySQL/MariaDB" : "Postgres"} database. The engine
-              introspects it into a map (a uuid foreign key stays uuid — on MySQL a CHAR(36) key is
-              recognised as uuid). The connection string is used once and never stored.
+              Connect to a {driver === "mysql" ? "MySQL/MariaDB" : driver === "sqlserver" ? "SQL Server" : "Postgres"}{" "}
+              database. The engine introspects it into a map (a uuid foreign key stays uuid — on MySQL a
+              CHAR(36) key, on SQL Server a UNIQUEIDENTIFIER, is recognised as uuid). The connection
+              string is used once and never stored.
             </p>
 
             {savedConnections.length > 0 && (
@@ -202,7 +211,7 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
               <Input
                 value={dsn}
                 onChange={(e) => setDsn(e.target.value)}
-                placeholder={driver === "mysql" ? "mysql://user:pass@host:3306/dbname" : "postgresql://user:pass@host:5432/dbname"}
+                placeholder={`${(DRIVER_DSN[driver] ?? DRIVER_DSN.postgres).scheme}://user:pass@host:${(DRIVER_DSN[driver] ?? DRIVER_DSN.postgres).port}/dbname`}
                 aria-label="Connection string"
                 className="mt-1 font-mono"
               />
@@ -216,7 +225,7 @@ export function ImportDialog({ open, onClose }: { open: boolean; onClose: () => 
             <p className="text-center text-2xs text-muted-foreground">— or enter the parts —</p>
             <div className="grid grid-cols-2 gap-2">
               <LabeledInput label="Host" value={host} onChange={setHost} placeholder="localhost" disabled={!!dsn.trim()} />
-              <LabeledInput label="Port" value={port} onChange={setPort} placeholder="5432" disabled={!!dsn.trim()} />
+              <LabeledInput label="Port" value={port} onChange={setPort} placeholder={(DRIVER_DSN[driver] ?? DRIVER_DSN.postgres).port} disabled={!!dsn.trim()} />
               <LabeledInput label="Database" value={database} onChange={setDatabase} placeholder="app" disabled={!!dsn.trim()} />
               <LabeledInput label="User" value={user} onChange={setUser} placeholder="postgres" disabled={!!dsn.trim()} />
               <LabeledInput label="Password" value={password} onChange={setPassword} type="password" disabled={!!dsn.trim()} className="col-span-2" />

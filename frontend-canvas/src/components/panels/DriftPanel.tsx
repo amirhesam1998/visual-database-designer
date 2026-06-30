@@ -24,12 +24,14 @@ function categoryOf(c: string) {
 }
 
 /** The driver is determined from the connection string (multi-driver §3): a `mysql://`/`mariadb://`
- *  DSN compares against MySQL, anything else (incl. `postgresql://`) against Postgres. Passed through
- *  so a MySQL connection runs the same drift as Postgres; the engine also infers this server-side. */
+ *  DSN compares against MySQL, `sqlserver://`/`mssql://` against SQL Server, anything else (incl.
+ *  `postgresql://`) against Postgres. Passed through so each engine runs the same drift; the engine
+ *  also infers this server-side, so an unrecognised scheme still works. */
 function driverFromDsn(dsn: string): string | undefined {
   const scheme = dsn.trim().split("://", 1)[0].toLowerCase();
   if (scheme === "mysql" || scheme === "mariadb") return "mysql";
   if (scheme === "postgres" || scheme === "postgresql") return "postgres";
+  if (scheme === "sqlserver" || scheme === "mssql") return "sqlserver";
   return undefined;
 }
 
@@ -96,7 +98,7 @@ export function DriftPanel({ open, onClose }: { open: boolean; onClose: () => vo
               value={dsn}
               onChange={(e) => setDsn(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && void run()}
-              placeholder="postgresql://… or mysql://user:pass@host:3306/dbname"
+              placeholder="postgresql://… · mysql://… · sqlserver://user:pass@host:1433/dbname"
               aria-label="Live database connection string"
               className="mt-1 font-mono"
             />

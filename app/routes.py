@@ -594,9 +594,10 @@ def register_interactive_routes(app: FastAPI) -> None:
         rewritten = False
         try:
             if sql is not None:
+                _shadow_env = {"mysql": "VDB_SHADOW_DSN_MYSQL", "sqlserver": "VDB_SHADOW_DSN_SQLSERVER"}
                 shadow_dsn = (
                     request.get("shadowDsn") or request.get("shadow_dsn")
-                    or os.getenv("VDB_SHADOW_DSN_MYSQL" if driver == "mysql" else "VDB_SHADOW_DSN")
+                    or os.getenv(_shadow_env.get(driver, "VDB_SHADOW_DSN"))
                     or os.getenv("VDB_SHADOW_DSN")
                 )
                 if not shadow_dsn:

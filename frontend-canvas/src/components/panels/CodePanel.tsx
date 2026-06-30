@@ -145,7 +145,7 @@ export function CodePanel({ open, onClose }: { open: boolean; onClose: () => voi
           <label className="flex flex-col gap-1 text-2xs text-muted-foreground">
             Database
             <Select value={driver} onChange={(e) => setDriver(e.target.value)} aria-label="Target database" className="w-32">
-              {(frameworks?.sql ?? ["postgres", "mysql"]).map((d) => (
+              {(frameworks?.sql ?? ["postgres", "mysql", "sqlserver"]).map((d) => (
                 <option key={d} value={d}>
                   {d}
                 </option>
