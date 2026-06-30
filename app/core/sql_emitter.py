@@ -27,7 +27,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.core.drivers import SUPPORTED_DRIVERS, SqlDialect, get_dialect, render_physical
+from app.core.drivers import SUPPORTED_DRIVERS, SqlDialect, get_dialect
 from app.core.risk import _driver_hint
 from app.core.schema_json import Field_, SchemaJson, Table
 from app.core.type_system import DEFAULT_REGISTRY, TypeRegistry, resolve_fk_physical
@@ -99,7 +99,7 @@ def _fk_type_overrides(schema: SchemaJson, dialect: SqlDialect, reg: TypeRegistr
     :func:`type_system.resolve_fk_physical` (driver-aware, shared with the importer); here we only
     render the resolved physical spec to this driver's type string.
     """
-    return {fid: render_physical(p)
+    return {fid: dialect.physical_to_type(p)
             for fid, p in resolve_fk_physical(schema, dialect.name, reg).items()}
 
 
@@ -183,17 +183,11 @@ def _emit_op(op: dict[str, Any], schema: SchemaJson, dialect: SqlDialect, reg: T
         )
     if name == "rename_column":
         tname = table.name if table else table_id
-        return SqlStep(
-            op=name, target=f"{tname}.{op.get('to')}",
-            up=[f"ALTER TABLE {q(tname)} RENAME COLUMN {q(op.get('from'))} TO {q(op.get('to'))};"],
-            down=[f"ALTER TABLE {q(tname)} RENAME COLUMN {q(op.get('to'))} TO {q(op.get('from'))};"],
-        )
+        up, down = dialect.rename_column_sql(tname, op.get("from"), op.get("to"))
+        return SqlStep(op=name, target=f"{tname}.{op.get('to')}", up=up, down=down)
     if name == "rename_table":
-        return SqlStep(
-            op=name, target=op.get("to"),
-            up=[f"ALTER TABLE {q(op.get('from'))} RENAME TO {q(op.get('to'))};"],
-            down=[f"ALTER TABLE {q(op.get('to'))} RENAME TO {q(op.get('from'))};"],
-        )
+        up, down = dialect.rename_table_sql(op.get("from"), op.get("to"))
+        return SqlStep(op=name, target=op.get("to"), up=up, down=down)
     if name == "change_type":
         return _emit_change_type(table, field_id, op, dialect, reg)
     if name == "set_not_null":
@@ -213,10 +207,11 @@ def _emit_op(op: dict[str, Any], schema: SchemaJson, dialect: SqlDialect, reg: T
         tname = table.name if table else table_id
         new = op.get("to")
         old = op.get("from")
-        up = [f"ALTER TABLE {q(tname)} ALTER COLUMN {q(cname)} "
-              + (f"SET DEFAULT {_render_default(new)};" if new is not None else "DROP DEFAULT;")]
-        down = [f"ALTER TABLE {q(tname)} ALTER COLUMN {q(cname)} "
-                + (f"SET DEFAULT {_render_default(old)};" if old is not None else "DROP DEFAULT;")]
+        up, down = dialect.change_default_sql(
+            tname, cname,
+            _render_default(new) if new is not None else None,
+            _render_default(old) if old is not None else None,
+        )
         return SqlStep(op=name, target=f"{tname}.{cname}", up=up, down=down)
     if name == "set_primary_key":
         cname = _col_name(table, field_id or "")
@@ -268,7 +263,7 @@ def _emit_add_column(table: Table | None, field_id: str | None, op: dict[str, An
         cname = payload.get("name", field_id)
         col = f"{dialect.q(cname)} text" + ("" if payload.get("nullable", True) else " NOT NULL")
     return SqlStep(op="add_column", target=f"{tname}.{cname}",
-                   up=[f"ALTER TABLE {dialect.q(tname)} ADD COLUMN {col};"],
+                   up=[f"ALTER TABLE {dialect.q(tname)} {dialect.add_column_clause} {col};"],
                    down=[f"ALTER TABLE {dialect.q(tname)} DROP COLUMN {dialect.q(cname)};"])
 
 

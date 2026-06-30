@@ -109,6 +109,7 @@ class SqlDialect:
     table_options: str = ""  # appended after the closing ``)`` of CREATE TABLE (e.g. " ENGINE=InnoDB")
     drop_table_clause: str = ""  # appended after DROP TABLE IF EXISTS <name> (e.g. " CASCADE")
     autoincrement_keyword: str = ""  # column attribute for self-incrementing keys (MySQL AUTO_INCREMENT)
+    add_column_clause: str = "ADD COLUMN"  # ALTER TABLE … <clause> <coldef> (T-SQL drops the COLUMN word)
 
     def q(self, identifier: str) -> str:
         """Quote a SQL identifier, doubling any embedded quote char."""
@@ -121,9 +122,16 @@ class SqlDialect:
         except (KeyError, UnsupportedPhysicalTypeError):
             return {"type": "text"}  # unknown/unsupported semantic type → a column the DDL can still create
 
+    def physical_to_type(self, p: dict[str, Any]) -> str:
+        """Render a resolved physical spec to this driver's type string. The single render seam used by
+        *both* ``render_type`` (columns) and the FK type resolution, so a driver that spells a type
+        differently (SQL Server prefers ``NVARCHAR`` over ``VARCHAR``) overrides here and stays
+        consistent everywhere. Default: render verbatim."""
+        return render_physical(p)
+
     def render_type(self, field: Field_, reg: TypeRegistry) -> str:
-        """Default: render the resolved physical type verbatim (MySQL behaviour; Postgres adds serial)."""
-        return render_physical(self.physical(field, reg))
+        """Default: render the resolved physical type (MySQL behaviour; Postgres adds serial)."""
+        return self.physical_to_type(self.physical(field, reg))
 
     def create_table_sql(self, name: str, body: str) -> str:
         return f"CREATE TABLE {self.q(name)} (\n{body}\n){self.table_options};"
@@ -150,6 +158,24 @@ class SqlDialect:
 
     def drop_primary_key_sql(self, tname: str) -> str:
         raise NotImplementedError
+
+    # The next three default to ANSI ``ALTER TABLE`` shapes that Postgres and MySQL share verbatim;
+    # a driver whose syntax genuinely differs (T-SQL uses ``sp_rename`` and named default constraints)
+    # overrides them, so the emitter stays driver-agnostic instead of hardcoding one engine's grammar.
+    def rename_column_sql(self, tname: str, frm: str, to: str) -> tuple[list[str], list[str]]:
+        return ([f"ALTER TABLE {self.q(tname)} RENAME COLUMN {self.q(frm)} TO {self.q(to)};"],
+                [f"ALTER TABLE {self.q(tname)} RENAME COLUMN {self.q(to)} TO {self.q(frm)};"])
+
+    def rename_table_sql(self, frm: str, to: str) -> tuple[list[str], list[str]]:
+        return ([f"ALTER TABLE {self.q(frm)} RENAME TO {self.q(to)};"],
+                [f"ALTER TABLE {self.q(to)} RENAME TO {self.q(frm)};"])
+
+    def change_default_sql(self, tname: str, cname: str, new_literal: str | None, old_literal: str | None
+                           ) -> tuple[list[str], list[str]]:
+        def stmt(lit: str | None) -> str:
+            tail = f"SET DEFAULT {lit};" if lit is not None else "DROP DEFAULT;"
+            return f"ALTER TABLE {self.q(tname)} ALTER COLUMN {self.q(cname)} {tail}"
+        return [stmt(new_literal)], [stmt(old_literal)]
 
 
 # ==================================================================================================

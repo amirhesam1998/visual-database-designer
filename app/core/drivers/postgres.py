@@ -18,7 +18,6 @@ from app.core.drivers.base import (
     IntrospectedSchema,
     IntrospectedTable,
     SqlDialect,
-    render_physical,
 )
 from app.core.schema_json import Field_
 from app.core.type_system import TypeRegistry
@@ -40,7 +39,7 @@ class PostgresDialect(SqlDialect):
         # Auto-increment integers become Postgres serial/bigserial so the column self-populates.
         if field.auto_increment and base in {"integer", "smallint", "bigint"}:
             return {"bigint": "bigserial", "smallint": "smallserial"}.get(base, "serial")
-        return render_physical(p)
+        return self.physical_to_type(p)
 
     def add_index_sql(self, iname: str, tname: str, cols: list[str], *, unique: bool) -> tuple[list[str], list[str]]:
         unique_kw = "UNIQUE " if unique else ""
