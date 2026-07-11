@@ -52,6 +52,20 @@ def test_unknown_prd_falls_back_to_generic_table():
     assert [t["name"] for t in out["suggestion"]["logical"]["tables"]] == ["items"]
 
 
+def test_education_prd_yields_a_multi_table_schema_no_llm():
+    """Bug §1 (real usage): "build an online course education platform" produced a single generic
+    table when no LLM was configured. The education bundle must now seed a coherent multi-table schema
+    (courses, students, enrollments, lessons, instructors) with relations — deterministically."""
+    out = _run(suggest_schema("build an online course education platform for a website"))
+    assert out["source"] == "heuristic"
+    names = {t["name"] for t in out["suggestion"]["logical"]["tables"]}
+    assert {"courses", "students", "enrollments", "lessons", "instructors"} <= names
+    # enrollments wires student_id→students and course_id→courses; lessons→courses; courses→instructors.
+    assert len(out["suggestion"]["logical"]["relations"]) >= 4
+    schema = sj.load(out["suggestion"])  # raises if structurally invalid
+    assert v.validate(schema).valid
+
+
 def test_suggestion_is_structurally_and_referentially_valid():
     out = _run(suggest_schema("blog with posts and comments and users"))
     schema = sj.load(out["suggestion"])  # raises if structurally invalid

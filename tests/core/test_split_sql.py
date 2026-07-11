@@ -9,7 +9,7 @@ comments and respect quoting so each real statement survives intact.
 
 from __future__ import annotations
 
-from app.core.importer import split_sql
+from app.core.importer import schema_statements, split_sql
 
 
 def test_strips_line_and_block_comments_keeping_statements():
@@ -78,3 +78,35 @@ def test_no_statement_starts_with_a_comment():
     stmts = split_sql(sql)
     assert all(not s.lstrip().startswith(("--", "#", "/*")) for s in stmts)
     assert [s.split("(")[0].strip() for s in stmts] == ["CREATE TABLE `a`", "ALTER TABLE `a` ADD KEY"]
+
+
+# --- schema_statements: a shadow import applies only DDL, never the data dump (bug §2) -------------
+
+
+def test_schema_statements_drops_data_keeps_ddl():
+    """The "Lost connection" root cause: a real dump's huge INSERTs blow max_allowed_packet. A shadow
+    import only needs structure, so INSERT/REPLACE/LOCK/transaction control are dropped; DDL stays."""
+    dump = """
+        CREATE TABLE `users` (`id` int NOT NULL AUTO_INCREMENT, `email` varchar(255), PRIMARY KEY (`id`));
+        LOCK TABLES `users` WRITE;
+        INSERT INTO `users` (`id`, `email`) VALUES (1, 'a@example.com'), (2, 'b@example.com');
+        REPLACE INTO `users` VALUES (3, 'c@example.com');
+        UNLOCK TABLES;
+        ALTER TABLE `users` ADD UNIQUE KEY `email` (`email`);
+    """
+    kept = schema_statements(split_sql(dump))
+    kinds = [s.split("(")[0].split()[0].upper() for s in kept]
+    assert kinds == ["CREATE", "ALTER"]                      # only the two DDL statements survive
+    assert not any(s.upper().lstrip().startswith(("INSERT", "REPLACE", "LOCK", "UNLOCK")) for s in kept)
+
+
+def test_schema_statements_drops_a_huge_insert_but_keeps_the_table():
+    """A multi-megabyte INSERT (the literal trigger of 'Lost connection during query') is dropped, so
+    the table is still created from the dump and the import can finish."""
+    big_values = ", ".join(f"({i}, 'x{i}')" for i in range(50_000))  # a large single INSERT
+    dump = (
+        "CREATE TABLE `t` (`id` int, `v` varchar(50));\n"
+        f"INSERT INTO `t` (`id`, `v`) VALUES {big_values};\n"
+    )
+    kept = schema_statements(split_sql(dump))
+    assert len(kept) == 1 and kept[0].startswith("CREATE TABLE `t`")

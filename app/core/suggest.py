@@ -140,6 +140,15 @@ def _pk() -> dict[str, Any]:
     return _field("id", "uuid", isPrimaryKey=True, nullable=False)
 
 
+# Education / e-learning domain: any one of these keywords means "this is a courses platform", so the
+# whole bundle (courses + students + enrollments + lessons + instructors) is seeded together — a single
+# `courses` table for an "online course platform" PRD was the bug §1 symptom.
+_KW_EDU = (
+    "course", "courses", "education", "educational", "e-learning", "elearning", "learning", "lms",
+    "online class", "online classes", "دوره", "آموزش", "آموزشی", "یادگیری", "کلاس آنلاین",
+)
+
+
 # Each entity: trigger keywords → (table name, fields, [relation target table names]).
 _ENTITY_TEMPLATES: list[tuple[tuple[str, ...], str, list[dict[str, Any]], list[str]]] = [
     (("user", "users", "account", "کاربر", "حساب", "مشتری", "customer"), "users",
@@ -161,6 +170,23 @@ _ENTITY_TEMPLATES: list[tuple[tuple[str, ...], str, list[dict[str, Any]], list[s
       _field("author_id", "foreign_key")], ["users"]),
     (("comment", "comments", "نظر", "دیدگاه"), "comments",
      [_pk(), _field("body", "text", nullable=False), _field("author_id", "foreign_key")], ["users"]),
+    # --- Education / e-learning bundle (all share _KW_EDU so a single "course" PRD seeds the domain) ---
+    (_KW_EDU + ("instructor", "instructors", "teacher", "teachers", "مدرس", "استاد", "معلم"), "instructors",
+     [_pk(), _field("email", "email", nullable=False), _field("full_name", "string", nullable=False),
+      _field("bio", "text")], []),
+    (_KW_EDU, "courses",
+     [_pk(), _field("title", "string", nullable=False), _field("description", "text"),
+      _field("price", "money"), _field("instructor_id", "foreign_key")], ["instructors"]),
+    (_KW_EDU + ("student", "students", "learner", "learners", "دانشجو", "دانش‌آموز", "فراگیر"), "students",
+     [_pk(), _field("email", "email", nullable=False), _field("full_name", "string"),
+      _field("enrolled_at", "timestamp")], []),
+    (_KW_EDU + ("lesson", "lessons", "module", "modules", "درس", "جلسه", "محتوا"), "lessons",
+     [_pk(), _field("course_id", "foreign_key", nullable=False), _field("title", "string", nullable=False),
+      _field("body", "markdown"), _field("position", "integer")], ["courses"]),
+    (_KW_EDU + ("enroll", "enrollment", "enrollments", "registration", "ثبت‌نام", "ثبت نام"), "enrollments",
+     [_pk(), _field("student_id", "foreign_key", nullable=False),
+      _field("course_id", "foreign_key", nullable=False), _field("status", "status", nullable=False),
+      _field("enrolled_at", "timestamp")], ["students", "courses"]),
 ]
 
 

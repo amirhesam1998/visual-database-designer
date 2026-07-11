@@ -8,5 +8,10 @@ psycopg[binary]==3.3.4
 # MySQL/MariaDB driver (multi-driver milestone): introspection + shadow-DB apply for the MySQL
 # driver. Pure-Python, no system libs needed; imported lazily so it's optional at runtime.
 PyMySQL==1.1.1
+# SQL Server driver (multi-driver milestone, third database): introspection + shadow-DB apply for
+# the MSSQL driver. Ships manylinux wheels (no FreeTDS/system libs at build); imported lazily so it's
+# optional at runtime. Must be in the image, not just a local venv — otherwise a live SQL Server
+# connection from inside the container fails with "no SQL Server driver installed".
+pymssql==2.3.13
 # Deterministic YAML export in app/core/schema_export.py (Code panel Artifact menu).
 PyYAML==6.0.3

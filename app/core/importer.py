@@ -41,7 +41,8 @@ from app.core.type_system import DEFAULT_REGISTRY, TypeRegistry, infer_semantic_
 __all__ = [
     "IntrospectedColumn", "IntrospectedTable", "IntrospectedForeignKey", "IntrospectedIndex",
     "IntrospectedEnum", "IntrospectedSchema", "introspect_postgres", "introspect_mysql",
-    "introspect_sqlserver", "apply_sql", "split_sql", "import_sql_via_shadow", "build_schema_json",
+    "introspect_sqlserver", "apply_sql", "split_sql", "schema_statements", "import_sql_via_shadow",
+    "build_schema_json",
     "enrich_ambiguous",
 ]
 
@@ -172,6 +173,31 @@ def split_sql(text: str) -> list[str]:
     return statements
 
 
+# Statement kinds that carry **data or session state**, not schema. A shadow import only needs the
+# *structure* — it applies the dump then introspects it — so executing the data is pure waste and, on a
+# real dump, the actual failure mode: a multi-megabyte ``INSERT`` exceeds ``max_allowed_packet`` and the
+# server drops the connection ("Lost connection to MySQL server during query"), or a long data load hits
+# a timeout. So we drop them before applying and keep only the DDL that defines the schema.
+_DATA_STATEMENT_STARTS = (
+    "insert", "replace", "load data", "lock tables", "unlock tables",
+    "start transaction", "begin", "commit", "rollback", "use ",
+)
+
+
+def schema_statements(statements: list[str]) -> list[str]:
+    """Keep only schema-defining DDL, dropping data/session statements (``INSERT``, ``LOCK TABLES``,
+    transaction control, …). A shadow import reflects only structure, so the data is irrelevant — and
+    a huge ``INSERT`` is exactly what makes a real dump drop the connection mid-import (the bug this
+    closes). DDL ordering is preserved; ``SET …`` pragmas are kept (small, sometimes load-bearing)."""
+    kept: list[str] = []
+    for stmt in statements:
+        low = " ".join(stmt.lower().split())  # normalise leading/inner whitespace for the prefix test
+        if low.startswith(_DATA_STATEMENT_STARTS):
+            continue
+        kept.append(stmt)
+    return kept
+
+
 def apply_sql(dsn: str, statements: list[str], *, driver: str = "postgres") -> None:
     """Apply raw-SQL statements in order to a (shadow) database — Leg B builder (impure; spec §2.2).
 
@@ -197,7 +223,9 @@ def import_sql_via_shadow(
     drv = core_drivers.get_driver(driver)
     if reset:
         drv.reset(shadow_dsn, schema=schema)
-    drv.apply_sql(shadow_dsn, split_sql(sql))
+    # Apply only the schema (DDL) — never the data dump, which is irrelevant to the resulting
+    # schema_json and is the real "Lost connection" trigger on a large file (spec bug §2).
+    drv.apply_sql(shadow_dsn, schema_statements(split_sql(sql)))
     return build_schema_json(drv.introspect(shadow_dsn, schema=schema), name=name, driver=driver)
 
 
