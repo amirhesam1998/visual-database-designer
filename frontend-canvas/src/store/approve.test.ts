@@ -59,6 +59,10 @@ function routedFetch() {
       const { status, body } = cfg.approve(ack);
       return json(body, status);
     }
+    // GET a session's doc by id (fetchSessionDoc) — the `?sessionId=` load path (bug §7 test).
+    if (isSession && /\/design\/sessions\/[^/]+$/.test(u) && (init?.method ?? "GET") === "GET") {
+      return json({ schema_json: doc() });
+    }
     if (isSession) return json({ sessionId: "ses_test01" }); // create
     return json({});
   });
@@ -143,5 +147,29 @@ describe("canvasStore diff + approve (engine gate)", () => {
     const ok = await useCanvasStore.getState().runApprove(true);
     expect(ok.status).toBe("approved");
     expect(useCanvasStore.getState().approved?.schemaVersion).toBe("v1");
+  });
+
+  it("persists the approved schema back to the loaded session so a reload keeps it (bug §7)", async () => {
+    // Re-load the canvas from a real design session (the `?sessionId=` deployment path), not a bare
+    // schemaJson — that is the case where edits used to vanish on reload, because the approve gate ran
+    // on a throwaway baseline session and the *loaded* session's schema_doc was never updated.
+    const fetchSpy = routedFetch();
+    globalThis.fetch = fetchSpy as never;
+    await useCanvasStore.getState().load({ sessionId: "ses_loaded01" });
+
+    await useCanvasStore.getState().removeTable("tbl_orders001");
+    fetchSpy.mockClear();
+
+    const res = await useCanvasStore.getState().runApprove(false);
+    expect(res.status).toBe("approved");
+
+    // The working doc (minus the dropped table) must be applied back to the LOADED session id, so a
+    // subsequent fetchSessionDoc returns the approved map — not the pre-edit one.
+    const applyToLoaded = fetchSpy.mock.calls.find(
+      ([url]) => String(url).includes("/design/sessions/ses_loaded01/apply-suggestion"),
+    );
+    expect(applyToLoaded).toBeTruthy();
+    const persisted = JSON.parse(String((applyToLoaded![1] as RequestInit).body)).schema_json;
+    expect(persisted.logical.tables.map((t: { id: string }) => t.id)).toEqual(["tbl_users0001"]);
   });
 });

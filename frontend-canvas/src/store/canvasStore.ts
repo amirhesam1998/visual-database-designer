@@ -405,6 +405,20 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       await submitSession(sid);
       const { status, body } = await approveSession(sid, { approvedBy: APPROVED_BY, acknowledgeCritical });
       if (status === 200) {
+        // Persist the approved schema back to the *loaded* session so a reload shows the approved map,
+        // not the pre-edit version (bug §7 root cause: the gate ran on a throwaway baseline session —
+        // createBaselineSession above — so the loaded `?sessionId=` session's schema_doc was never
+        // updated; only its presentation/positions were, via savePresentation. `doc` carries the
+        // presentation layer, so table positions are preserved). Server sessions are in-memory, so this
+        // survives a browser reload but not a server restart (a separate, known engine limitation).
+        const loadedSid = get().sessionId;
+        if (loadedSid) {
+          try {
+            await applySessionSchema(loadedSid, doc);
+          } catch {
+            /* non-fatal: in-browser state is already correct; only cross-reload persistence is lost */
+          }
+        }
         // The approved schema becomes the new base — subsequent changes diff against it (spec §2).
         set({
           baseline: doc,
