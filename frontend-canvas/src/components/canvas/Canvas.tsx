@@ -17,6 +17,7 @@ import { TableNode } from "./TableNode";
 import { RelationEdge } from "./RelationEdge";
 import { RelationDialog, type PendingConnection } from "./RelationDialog";
 import { buildGraph, type RelationEdgeData, type TableNodeData } from "@/lib/graph";
+import { NODE_WIDTH, nodeHeight } from "@/lib/layout";
 import {
   diffColors,
   driftColors,
@@ -44,7 +45,7 @@ export function Canvas({ model }: { model: RenderModel }) {
   const base = useMemo(() => buildGraph(model), [model]);
   const [nodes, setNodes, onNodesChange] = useNodesState<TableNodeData>(base.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RelationEdgeData>(base.edges);
-  const { getNodes, fitView } = useReactFlow();
+  const { getNodes, fitBounds } = useReactFlow();
 
   // Re-seed the graph whenever a new (engine-resolved) schema arrives (endpoint → state → render).
   useEffect(() => {
@@ -57,6 +58,7 @@ export function Canvas({ model }: { model: RenderModel }) {
   const selectedTableId = useCanvasStore((s) => s.selectedTableId);
   const hoveredTableId = useCanvasStore((s) => s.hoveredTableId);
   const search = useCanvasStore((s) => s.search);
+  const focusNonce = useCanvasStore((s) => s.focusNonce);
   const editable = useCanvasStore((s) => s.editable);
   const validation = useCanvasStore((s) => s.validation);
   const insights = useCanvasStore((s) => s.insights);
@@ -75,12 +77,47 @@ export function Canvas({ model }: { model: RenderModel }) {
   const neighbours = useMemo(() => focusNeighbours(model, focusId), [model, focusId]);
   const matching = useMemo(() => matchingTableIds(model, search), [model, search]);
 
+  // Centre + frame a set of tables by computing their bounding box from the *known* node geometry
+  // (positions from the layout, sizes seeded in buildGraph). This is deliberately independent of
+  // React Flow's measured internals: with `onlyRenderVisibleElements` a target that is off-screen has
+  // never been measured, so `fitView({nodes})` could not frame it — that was the large-project
+  // search-jump bug (§5). `fitBounds` over geometry we already hold always works. (`base` carries the
+  // freshly-resolved positions, so a just-created table is included before the local nodes re-seed.)
+  const jumpTo = useCallback(
+    (ids: Iterable<string>) => {
+      const want = new Set(ids);
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const n of base.nodes) {
+        if (!want.has(n.id)) continue;
+        const w = n.width ?? NODE_WIDTH;
+        const h = n.height ?? nodeHeight(n.data.table.fields.length);
+        minX = Math.min(minX, n.position.x);
+        minY = Math.min(minY, n.position.y);
+        maxX = Math.max(maxX, n.position.x + w);
+        maxY = Math.max(maxY, n.position.y + h);
+      }
+      if (minX === Infinity) return; // none of the ids are on the canvas
+      fitBounds(
+        { x: minX, y: minY, width: Math.max(maxX - minX, 1), height: Math.max(maxY - minY, 1) },
+        { duration: 400, padding: 0.4 },
+      );
+    },
+    [base, fitBounds],
+  );
+
   // Search jumps the viewport to the matching tables and frames them (spec §1.1 — "search that jumps
   // to the table and highlights it"). Highlighting is handled by the dimming of non-matches below.
   useEffect(() => {
     if (!search?.trim() || !matching || matching.size === 0) return;
-    fitView({ nodes: [...matching].map((id) => ({ id })), duration: 400, padding: 0.35, maxZoom: 1.2 });
-  }, [search, matching, fitView]);
+    jumpTo(matching);
+  }, [search, matching, jumpTo]);
+
+  // Bring a programmatically-focused table into view (bug §5 — after creating/duplicating a table, or
+  // any explicit "go to this table"). Driven by a nonce so repeated focus of the same id still fires.
+  useEffect(() => {
+    if (focusNonce > 0 && selectedTableId) jumpTo([selectedTableId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNonce]);
   const findings = useMemo(() => findingsByEntity(validation), [validation]);
   const insightMap = useMemo(() => insightsByEntity(insights), [insights]);
   // Tint = the engine's diff (vs the base) merged with a live-database drift report (vs the DB), both

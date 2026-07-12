@@ -96,6 +96,11 @@ interface CanvasState {
   hoveredTableId: string | null;
   search: string;
   theme: Theme;
+  /** A monotonic "jump the viewport to `selectedTableId`" signal (bug §5). Bumped when a table is
+   *  created/duplicated or otherwise needs to be brought into view; the canvas watches it and
+   *  centres+frames the table — even under node virtualisation, where a never-rendered off-screen
+   *  table could not be framed by `fitView`. */
+  focusNonce: number;
 
   load: (req: RenderRequest) => Promise<void>;
   refresh: () => Promise<void>;
@@ -143,6 +148,9 @@ interface CanvasState {
 
   select: (tableId: string | null) => void;
   hover: (tableId: string | null) => void;
+  /** Select a table AND ask the canvas to jump to it (bug §5 — used after creating/duplicating a
+   *  table, so a new table in a large map is brought into view instead of added off-screen). */
+  focusTable: (tableId: string) => void;
   setSearch: (q: string) => void;
   toggleTheme: () => void;
 }
@@ -171,6 +179,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   hoveredTableId: null,
   search: "",
   theme: initialTheme(),
+  focusNonce: 0,
 
   load: async (req) => {
     set({ status: "loading", error: null });
@@ -263,7 +272,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     await get().refresh();
   },
 
-  addTable: (name) => get().mutate((d) => edit.addTable(d, name).doc),
+  // Create a table AND bring it into view (bug §5: a new table in a large map was added off-screen
+  // with no way to find it). Mint the id once, apply the precomputed doc, then focus it.
+  addTable: async (name) => {
+    const cur = get().doc;
+    if (!cur) return;
+    const { doc: next, tableId } = edit.addTable(cur, name);
+    await get().mutate(() => next);
+    get().focusTable(tableId);
+  },
   removeTable: async (tableId) => {
     if (get().selectedTableId === tableId) set({ selectedTableId: null });
     await get().mutate((d) => edit.removeTable(d, tableId));
@@ -273,7 +290,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     if (!cur) return;
     const { doc: next, tableId: newId } = edit.duplicateTable(cur, tableId);
     await get().mutate(() => next); // apply the precomputed copy (ids minted once, AD-1)
-    set({ selectedTableId: newId });
+    get().focusTable(newId); // bring the copy into view (bug §5)
   },
   updateTable: (tableId, patch) => get().mutate((d) => edit.updateTable(d, tableId, patch)),
   setTimestamps: (tableId, on) => get().mutate((d) => edit.setTimestamps(d, tableId, on)),
@@ -411,6 +428,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   select: (tableId) => set({ selectedTableId: tableId }),
   hover: (tableId) => set({ hoveredTableId: tableId }),
+  focusTable: (tableId) => set((s) => ({ selectedTableId: tableId, focusNonce: s.focusNonce + 1 })),
   setSearch: (q) => set({ search: q }),
   toggleTheme: () => {
     const next: Theme = get().theme === "dark" ? "light" : "dark";
