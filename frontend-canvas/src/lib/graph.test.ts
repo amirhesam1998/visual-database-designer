@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildGraph, neighboursOf } from "./graph";
-import { resolvePositions } from "./layout";
+import { autoLayout, resolvePositions } from "./layout";
 import { RENDER_MODEL } from "@/test/fixtures";
-import type { RenderModel } from "./types";
+import type { RenderModel, RenderTable } from "./types";
 
 describe("buildGraph", () => {
   it("turns every table into a node and every (resolvable) relation into a directed edge", () => {
@@ -64,6 +64,52 @@ describe("layout", () => {
       tbl_users0001: { x: 11, y: 22 },
       tbl_orders001: { x: 333, y: 444 },
     });
+  });
+});
+
+describe("relations drive both the edges AND the clustering (bug §6)", () => {
+  // Bug §6 (relations shown wrong / related tables thrown aside with no line): the render AND the
+  // layout are both driven entirely by `model.relations` with a resolvable `toTableId`. This pins the
+  // contract — a relation present in the data with valid endpoints is BOTH drawn as an edge AND keeps
+  // its tables clustered together, while only a genuinely relation-less table is pushed off to the
+  // isolated grid. So an FK-bearing table that shows up isolated with no edge means the relation never
+  // reached the data (an import/inference gap), NOT a rendering bug.
+  const tbl = (id: string, name: string): RenderTable => ({
+    id,
+    name,
+    comment: null,
+    kind: "normal",
+    fields: [{
+      id: `fld_${id}`, name: "id", semanticType: "uuid", physicalType: "uuid", nullable: false,
+      isPrimaryKey: true, isForeignKey: false, pii: false, sensitivity: null, enumId: null, comment: null,
+    }],
+  });
+  const model: RenderModel = {
+    meta: {},
+    tables: [tbl("tbl_a", "a"), tbl("tbl_b", "b"), tbl("tbl_c", "c")],
+    relations: [
+      { id: "rel_ab", type: "one_to_many", fromTableId: "tbl_a", toTableId: "tbl_b", foreignKeyFieldId: "fld_tbl_a", onDelete: null, onUpdate: null },
+    ],
+    enums: [],
+    presentation: { nodes: [] },
+    hasLayout: false,
+  };
+
+  it("renders an edge for the FK relation and none for the unrelated table", () => {
+    const { edges } = buildGraph(model);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({ source: "tbl_a", target: "tbl_b" });
+  });
+
+  it("clusters the related pair adjacently and pushes the relation-less table aside", () => {
+    // dagre lays the a→b cluster out left-to-right (a left of b, ~one node-width apart); the isolated
+    // table is shelf-packed off to the right *after* the clusters. That is the correct inverse of the
+    // bug ("FK tables thrown to the side with no line"): the *unrelated* table goes aside, never the
+    // connected ones.
+    const pos = autoLayout(model);
+    expect(pos.tbl_a.x).toBeLessThan(pos.tbl_b.x);      // related pair kept adjacent in the cluster
+    expect(pos.tbl_c.x).toBeGreaterThan(pos.tbl_a.x);   // the isolated table is pushed to the right
+    expect(pos.tbl_c.x).toBeGreaterThan(pos.tbl_b.x);
   });
 });
 
