@@ -282,13 +282,16 @@ def introspect(dsn: str, *, schema: str | None = None) -> IntrospectedSchema:
             if tname in tables:
                 tables[tname].primary_key.append(cname)
 
-        fks: dict[str, IntrospectedForeignKey] = {}
+        # Key by (table, constraint), consistent with the other drivers and the index accumulation
+        # below — never by constraint name alone, which would merge two same-named FKs on different
+        # tables into one and drop a relation.
+        fks: dict[tuple[str, str], IntrospectedForeignKey] = {}
         for (cstr, tname, col, _ord, ref_table, ref_col, del_rule, upd_rule) in rows(_q_foreign_keys(sch)):
-            fk = fks.get(cstr)
+            fk = fks.get((tname, cstr))
             if fk is None:
                 fk = IntrospectedForeignKey(name=cstr, table=tname, ref_table=ref_table,
                                             on_delete=_rule(del_rule), on_update=_rule(upd_rule))
-                fks[cstr] = fk
+                fks[(tname, cstr)] = fk
             fk.columns.append(col)
             fk.ref_columns.append(ref_col)
 

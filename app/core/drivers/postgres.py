@@ -104,19 +104,35 @@ WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s
 ORDER BY tc.table_name, kcu.ordinal_position;
 """
 
+# Read foreign keys from ``pg_catalog`` rather than ``information_schema``. The information_schema
+# form joins key_column_usage × referential_constraints × constraint_column_usage on the constraint
+# *name* only, which (a) Cartesian-explodes composite FKs (every FK column paired with every
+# referenced column) and (b) cross-joins two constraints that share a name on different tables —
+# Postgres allows this, so ``information_schema`` genuinely cannot tell them apart and a relation is
+# lost/corrupted. ``pg_constraint`` rows are distinct per constraint OID and joined via the real table
+# OID, and ``unnest(conkey, confkey) WITH ORDINALITY`` pairs each FK column with its referenced column
+# by position — correct composite columns, no collision. The CASE keeps the same textual action shape
+# ``_rule`` already normalises.
 _Q_FOREIGN_KEYS = """
-SELECT tc.constraint_name, tc.table_name, kcu.column_name, kcu.ordinal_position,
-       ccu.table_name AS ref_table, ccu.column_name AS ref_column,
-       rc.delete_rule, rc.update_rule
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-JOIN information_schema.referential_constraints rc
-  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema
-JOIN information_schema.constraint_column_usage ccu
-  ON rc.unique_constraint_name = ccu.constraint_name AND rc.unique_constraint_schema = ccu.table_schema
-WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s
-ORDER BY tc.constraint_name, kcu.ordinal_position;
+SELECT con.conname AS constraint_name,
+       cl.relname  AS table_name,
+       att.attname AS column_name,
+       ord.n       AS ordinal_position,
+       clf.relname AS ref_table,
+       attf.attname AS ref_column,
+       CASE con.confdeltype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+                            WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS delete_rule,
+       CASE con.confupdtype WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+                            WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' END AS update_rule
+FROM pg_constraint con
+JOIN pg_class cl ON cl.oid = con.conrelid
+JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+JOIN pg_class clf ON clf.oid = con.confrelid
+JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS ord(conkey, confkey, n) ON true
+JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = ord.conkey
+JOIN pg_attribute attf ON attf.attrelid = con.confrelid AND attf.attnum = ord.confkey
+WHERE con.contype = 'f' AND ns.nspname = %s
+ORDER BY cl.relname, con.conname, ord.n;
 """
 
 _Q_INDEXES = """
@@ -207,13 +223,15 @@ def introspect(dsn: str, *, schema: str = "public") -> IntrospectedSchema:
                 if tname in tables and "IS NOT NULL" not in (clause or "").upper():
                     tables[tname].checks.append({"name": cstr, "clause": clause})
 
-            fks: dict[str, IntrospectedForeignKey] = {}
+            # Key by (table, constraint) — a constraint name is only unique per table in Postgres, so
+            # keying by name alone merges two same-named FKs on different tables and loses a relation.
+            fks: dict[tuple[str, str], IntrospectedForeignKey] = {}
             for (cstr, tname, col, _ord, ref_table, ref_col, del_rule, upd_rule) in rows(_Q_FOREIGN_KEYS):
-                fk = fks.get(cstr)
+                fk = fks.get((tname, cstr))
                 if fk is None:
                     fk = IntrospectedForeignKey(name=cstr, table=tname, ref_table=ref_table,
                                                 on_delete=_rule(del_rule), on_update=_rule(upd_rule))
-                    fks[cstr] = fk
+                    fks[(tname, cstr)] = fk
                 fk.columns.append(col)
                 fk.ref_columns.append(ref_col)
 

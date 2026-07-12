@@ -44,7 +44,10 @@ def _reference_schema() -> dict:
                 {"id": "tbl_orders001", "name": "orders", "kind": "normal", "fields": [
                     {"id": "fld_oid000001", "name": "id", "semanticType": "uuid",
                      "isPrimaryKey": True, "nullable": False},
-                    {"id": "fld_ouser0001", "name": "user_id", "semanticType": "foreign_key", "nullable": False},
+                    # A uuid-keyed FK column round-trips as its physical type (uuid) — the FK-ness is
+                    # carried by the relation below (foreignKeyFieldId), not the column's semantic type.
+                    # This matches the SQL Server gate (test_m6) and the importer's "FK lesson" design.
+                    {"id": "fld_ouser0001", "name": "user_id", "semanticType": "uuid", "nullable": False},
                     {"id": "fld_ototal001", "name": "total", "semanticType": "money", "nullable": False},
                 ]},
             ],
