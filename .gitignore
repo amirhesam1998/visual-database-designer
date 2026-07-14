@@ -186,3 +186,7 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /docs
+
+# Claude Code local settings — never meant to be tracked
+.claude/
+TECHNICAL_INTERVIEW_README.md

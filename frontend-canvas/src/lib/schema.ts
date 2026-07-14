@@ -141,6 +141,13 @@ export function removeTable(doc: SchemaDoc, tableId: string): SchemaDoc {
   return next;
 }
 
+/** Relations that touch a table (as source or target). `removeTable` cascade-drops these — the UI
+ *  uses this to WARN the user how many relationships a delete will take with it (B1: delete decision =
+ *  cascade, but never silently — the canvas confirms first when the count is non-zero). */
+export function relationsReferencing(doc: SchemaDoc, tableId: string): SchemaRelation[] {
+  return relations(doc).filter((r) => r.fromTableId === tableId || r.toTableId === tableId);
+}
+
 export function updateTable(
   doc: SchemaDoc,
   tableId: string,

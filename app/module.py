@@ -17,7 +17,7 @@ the same path the Feature Implementation module uses).
 
 from __future__ import annotations
 
-from aiarch_module_sdk import Manifest, Module, Needs, RunContext, build_module_app
+from aiarch_module_sdk import Capabilities, Manifest, Module, Needs, RunContext, build_module_app
 
 from app.designer import SchemaDesigner
 from app.output import DatabaseSchemaResult
@@ -39,6 +39,22 @@ class VisualDatabaseDesignerModule(Module):
         title="Visual Database Designer",
         description="Designs a normalized database schema from a feature description (or imports an existing one), "
         "validates it, and exports SQL, Laravel migrations, Prisma, a Mermaid ERD and an OpenAPI stub.",
+        # Advertise the rich surface beyond the single `database_schema` artifact so the orchestrator
+        # and Pipeline Studio can discover it (G2). This is advisory only — the DAG still wires this
+        # module purely by produces="database_schema". `endpoint` points at the runtime GET
+        # /capabilities descriptor (this module's app.routes) for the full, always-current detail.
+        capabilities=Capabilities(
+            exports=[
+                "sql", "migration", "prisma", "mermaid", "openapi",
+                "markdown", "yaml", "dbml", "jsonschema", "datadict",
+            ],
+            operations=[
+                "design", "validate", "export", "import", "introspect",
+                "drift", "seed", "compare", "api_contract", "code_generation", "insights",
+            ],
+            drivers=["postgres", "mysql", "sqlserver"],
+            endpoint="/capabilities",
+        ),
     )
     output_model = DatabaseSchemaResult
 

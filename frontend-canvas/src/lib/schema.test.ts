@@ -75,6 +75,15 @@ describe("schema mutations (structural only, never decide validity)", () => {
     expect(edit.presentationNodes(after).map((n) => n.tableId)).toEqual(["tbl_orders001"]);
   });
 
+  it("relationsReferencing finds relations touching a table as source OR target (delete warning, B1)", () => {
+    // orders --(fk user_id)--> users : the relation references BOTH tables.
+    expect(edit.relationsReferencing(doc(), "tbl_users0001").map((r) => r.id)).toEqual(["rel_order_usr"]);
+    expect(edit.relationsReferencing(doc(), "tbl_orders001").map((r) => r.id)).toEqual(["rel_order_usr"]);
+    // a table nothing points at has no referencing relations.
+    const { doc: isolated, tableId: newId } = edit.addTable(doc(), "audit_log");
+    expect(edit.relationsReferencing(isolated, newId)).toHaveLength(0);
+  });
+
   it("addRelation always carries an explicit foreignKeyFieldId", () => {
     const { doc: after } = edit.addRelation(doc(), {
       type: "one_to_many",

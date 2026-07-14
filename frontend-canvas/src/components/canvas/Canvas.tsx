@@ -16,6 +16,7 @@ import "reactflow/dist/style.css";
 import { TableNode } from "./TableNode";
 import { RelationEdge } from "./RelationEdge";
 import { RelationDialog, type PendingConnection } from "./RelationDialog";
+import { TableContextMenu, type TableMenuTarget } from "./TableContextMenu";
 import { buildGraph, type RelationEdgeData, type TableNodeData } from "@/lib/graph";
 import { NODE_WIDTH, nodeHeight } from "@/lib/layout";
 import {
@@ -70,6 +71,7 @@ export function Canvas({ model }: { model: RenderModel }) {
   const addTable = useCanvasStore((s) => s.addTable);
 
   const [pending, setPending] = useState<PendingConnection | null>(null);
+  const [menu, setMenu] = useState<TableMenuTarget | null>(null);
 
   // Derive read-only emphasis (unchanged from M1) and, in edit mode, where the engine reported
   // errors so the exact field/table can be marked (spec §6). Nothing here decides validity.
@@ -192,6 +194,15 @@ export function Canvas({ model }: { model: RenderModel }) {
   const onNodeClick: NodeMouseHandler = (_, node) => select(node.id);
   const onNodeMouseEnter: NodeMouseHandler = (_, node) => hover(node.id);
 
+  // Right-clicking a table opens its context menu (B1: rename / duplicate / delete). Edit-mode only —
+  // in read-only mode the browser's native menu is left alone.
+  const onNodeContextMenu: NodeMouseHandler = (e, node) => {
+    if (!editable) return;
+    e.preventDefault();
+    select(node.id);
+    setMenu({ tableId: node.id, x: e.clientX, y: e.clientY });
+  };
+
   // Dragging from a source handle onto another table opens the relation dialog (the FK field is
   // chosen there). We never add the edge directly — it appears after the engine re-renders.
   const onConnect = useCallback((c: Connection) => {
@@ -237,7 +248,11 @@ export function Canvas({ model }: { model: RenderModel }) {
         onNodeClick={onNodeClick}
         onNodeMouseEnter={onNodeMouseEnter}
         onNodeMouseLeave={() => hover(null)}
-        onPaneClick={() => select(null)}
+        onNodeContextMenu={onNodeContextMenu}
+        onPaneClick={() => {
+          select(null);
+          setMenu(null);
+        }}
         onConnect={onConnect}
         onNodeDragStop={onNodeDragStop}
         onNodesDelete={onNodesDelete}
@@ -266,6 +281,14 @@ export function Canvas({ model }: { model: RenderModel }) {
         />
       </ReactFlow>
       <RelationDialog pending={pending} onClose={() => setPending(null)} />
+      {menu && (
+        <TableContextMenu
+          tableId={menu.tableId}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
